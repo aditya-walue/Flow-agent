@@ -48,6 +48,21 @@ class FlowProvider(Document):
 			self.base_url = self.base_url.strip()
 		if isinstance(self.api_key, str):
 			self.api_key = self.api_key.strip()
+		# An untouched JSON field arrives from the Desk form as "", and the
+		# column is `longtext ... CHECK (json_valid(extra_params))`, for which
+		# the empty string is not valid JSON. The save then failed at the
+		# database with OperationalError 4025 rather than anywhere a user could
+		# act on:
+		#   CONSTRAINT `tabflow provider.extra_params` failed
+		# _validate_extra_params() cannot catch it either, since it returns
+		# early on a falsy value — "" is skipped as "nothing to validate" and
+		# forwarded to MariaDB unchanged.
+		#
+		# NULL is what "no extra params" means here: the column is DEFAULT NULL
+		# and json_valid is not applied to NULL. Whitespace-only is treated the
+		# same, since it is equally not JSON and equally means nothing was set.
+		if isinstance(self.extra_params, str) and not self.extra_params.strip():
+			self.extra_params = None
 
 	def _validate_provider_known(self):
 		try:
