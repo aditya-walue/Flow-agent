@@ -133,13 +133,14 @@ def describe(
 	return result
 
 
-@tool
+@tool(precheck=lambda args, context=None: _precheck_query(args))
 def read(
 	doctype: DocTypeArg,
 	filters: FiltersArg = None,
 	fields: Annotated[
 		list[str] | None,
-		'Fieldnames to return, e.g. ["name", "customer", "grand_total", "status"]. Default ["name"].',
+		'Fieldnames to return, e.g. ["name", "customer", "grand_total", "status"]. '
+		"Omit for the DocType's key columns.",
 	] = None,
 	limit: Annotated[int, "Max records (default 20, max 200)."] = 20,
 	order_by: Annotated[str | None, 'e.g. "creation desc" or "grand_total desc".'] = None,
@@ -153,10 +154,88 @@ def read(
 	return frappe.get_list(
 		doctype,
 		filters=filters,
-		fields=fields or ["name"],
+		fields=fields or _key_columns(doctype),
 		limit=limit,
 		order_by=order_by,
 	)
+
+
+# Record attributes every DocType has, valid in filters and fields.
+STANDARD_COLUMNS = frozenset({"name", "owner", "creation", "modified", "modified_by", "docstatus", "idx"})
+# Operator words models use, as Frappe filter operators.
+OPERATOR_ALIASES = {
+	"eq": "=", "equals": "=", "==": "=", "is": "=",
+	"ne": "!=", "neq": "!=", "not equals": "!=", "<>": "!=",
+	"gt": ">", "gte": ">=", "lt": "<", "lte": "<=",
+	"contains": "like", "includes": "like",
+	"notin": "not in", "nin": "not in",
+}
+QUERY_OPTIONS = ("order_by", "fields", "limit")
+KEY_COLUMNS_LIMIT = 6
+
+
+def _key_columns(doctype: str) -> list[str]:
+	"""The columns worth showing when the model asks for records without naming fields: the
+	ID, title, status and the DocType's list-view columns (a bare list of IDs answers nothing)."""
+	meta = frappe.get_meta(doctype)
+	picked = ["name"]
+	for fieldname in (meta.title_field, "status"):
+		if fieldname and meta.has_field(fieldname):
+			picked.append(fieldname)
+	for f in meta.fields:
+		if (
+			f.in_list_view
+			and not f.permlevel
+			and f.fieldtype not in LAYOUT_FIELDTYPES
+			and f.fieldtype not in ("Table", "Table MultiSelect", "Text Editor", "HTML", "Image", "Attach Image")
+		):
+			picked.append(f.fieldname)
+	return list(dict.fromkeys(picked))[: KEY_COLUMNS_LIMIT + 1]
+
+
+def _precheck_query(args: dict[str, Any]) -> str | None:
+	"""Tidy read/count arguments the way small models garble them: options inside `filters`
+	(`order_by` there reads to Frappe as a field it may not access), operator words ("eq",
+	"contains"), labels for fieldnames; then name any filter key that isn't a field."""
+	import difflib
+
+	doctype, filters = args.get("doctype"), args.get("filters")
+	if not doctype or not frappe.db.exists("DocType", doctype) or not isinstance(filters, dict):
+		return None
+	for option in QUERY_OPTIONS:
+		if option in filters:
+			value = filters.pop(option)
+			if option in args and not args.get(option):
+				args[option] = value
+	meta = frappe.get_meta(doctype)
+	by_label = {(f.label or "").lower(): f.fieldname for f in meta.fields if f.label and f.fieldtype not in LAYOUT_FIELDTYPES}
+	tidy: dict[str, Any] = {}
+	unknown = []
+	for key, condition in filters.items():
+		fieldname = key if (meta.has_field(key) or key in STANDARD_COLUMNS) else by_label.get(str(key).lower())
+		if not fieldname:
+			names = [f.fieldname for f in meta.fields if f.fieldtype not in LAYOUT_FIELDTYPES]
+			close = difflib.get_close_matches(str(key).lower(), names, n=3, cutoff=0.5)
+			unknown.append(f"{key!r}" + (f" (did you mean {', '.join(close)}?)" if close else ""))
+			continue
+		tidy[fieldname] = _normalize_condition(condition)
+	args["filters"] = tidy
+	if unknown:
+		return (
+			f"Not fields of {doctype}: {', '.join(unknown)}. `filters` only holds field conditions "
+			'like {"status": "Paid"}; put order_by, fields and limit beside it.'
+		)
+	return None
+
+
+def _normalize_condition(condition: Any) -> Any:
+	if not (isinstance(condition, list) and len(condition) == 2 and isinstance(condition[0], str)):
+		return condition
+	operator, value = condition[0].strip().lower(), condition[1]
+	operator = OPERATOR_ALIASES.get(operator, operator)
+	if operator == "like" and isinstance(value, str) and "%" not in value:
+		value = f"%{value}%"
+	return [operator, value]
 
 
 # Required fields ERPNext/Frappe fill in themselves on a new form — listing them as steps
@@ -192,7 +271,77 @@ KEY_ROW_FIELDS = ("item_code", "qty", "rate")
 LINK_EXAMPLES = 3
 
 
-@tool(final_answer=True)
+GREETING = re.compile(
+	r"^\s*(h+i+|he+y+|hel+o+|hiya|yo|namaste|good\s+(morning|afternoon|evening)|greetings)\b[\s!.,]*(there|flow)?[\s!.]*$",
+	re.IGNORECASE,
+)
+THANKS = re.compile(r"^\s*(thanks?|thank\s+you|thx|ty|ok(ay)?|cool|great|nice|got\s+it)\b[\s!.,]*(so\s+much|a\s+lot|flow)?[\s!.]*$", re.IGNORECASE)
+CAPABILITIES = (
+	"I can help with your ERPNext data:\n"
+	"- **Count** records: *how many employees are there?*\n"
+	"- **Show** details: *show the details of ACC-SINV-2026-00008*\n"
+	"- **Explain** how to create something: *how to create a sales order?*\n"
+	"- **Create** records for you: *create a todo with description call vendor*\n"
+	"- **Diagnose** an error: paste the error message"
+)
+
+
+def _route_small_talk(text: str) -> dict[str, Any] | None:
+	if GREETING.match(text or ""):
+		return {"kind": "greeting"}
+	if THANKS.match(text or ""):
+		return {"kind": "thanks"}
+	return None
+
+
+@tool(final_answer=True, route=_route_small_talk)
+def small_talk(kind: Annotated[str, '"greeting" or "thanks".'] = "greeting") -> dict[str, Any]:
+	"""Reply to a greeting or thanks, with what the assistant can do. No data is read."""
+	if kind == "thanks":
+		return {"answer": "You're welcome! Anything else I can help with?"}
+	first = (frappe.utils.get_fullname(frappe.session.user) or "").split(" ")[0]
+	hello = f"Hi {first}!" if first and first not in ("Administrator", "Guest") else "Hi!"
+	return {"answer": f"{hello} {CAPABILITIES}"}
+
+
+@tool(final_answer=True, route=lambda text: _route_required_values(text))
+def required_values(doctype: DocTypeArg) -> dict[str, Any]:
+	"""Ask the user for the values needed to create a record of a DocType, with an example line
+	they can fill in. Use when the user wants to create a record but hasn't given the values.
+	"""
+	if not frappe.has_permission(doctype, "create"):
+		raise PermissionError(f"No permission to create {doctype}")
+	meta = frappe.get_meta(doctype)
+	date_format = frappe.db.get_single_value("System Settings", "date_format") or "yyyy-mm-dd"
+	_defaults, sole_links = _field_facts(doctype)
+	fields = [f for f in _user_filled(meta) if f.fieldname not in sole_links]
+	fields += _conditionally_required(meta)
+	rows = []
+	for table in meta.get_table_fields():
+		if table.reqd:
+			child = frappe.get_meta(table.options)
+			cols = [child.get_field(f) for f in KEY_ROW_FIELDS if child.get_field(f)]
+			rows.append((table, cols))
+	if not fields and not rows:
+		fields = _important_fields(meta, exclude=set())
+	lines = [f"- {_field_hint(f, date_format)}" for f in fields]
+	for table, cols in rows:
+		lines.append(f"- **{table.label}**: " + ", ".join(f.label for f in cols))
+	example = ", ".join(
+		[f"{(f.label or f.fieldname).lower()} …" for f in fields] + [f"{c.label.lower()} …" for _t, cols in rows for c in cols]
+	)
+	auto = ", ".join(
+		f"**{meta.get_field(k).label}** ({v})" for k, v in sole_links.items() if meta.get_field(k)
+	)
+	answer = (
+		f"To create a new **{doctype}**, I need:\n" + "\n".join(lines)
+		+ (f"\n\n{auto} will be filled in automatically." if auto else "")
+		+ f"\n\nSend them in one message, e.g.:\n> create {doctype.lower()} with {example}"
+	)
+	return {"doctype": doctype, "answer": answer}
+
+
+@tool(final_answer=True, route=lambda text: _route_creation_steps(text))
 def creation_steps(doctype: DocTypeArg) -> dict[str, Any]:
 	"""Step-by-step guide for creating a record of a DocType by hand in the desk, built from
 	this site's real required fields. Use for "how do I create/add X" questions. The guide is
@@ -393,19 +542,189 @@ def _field_hint(field: Any, date_format: str = "yyyy-mm-dd") -> str:
 COUNT_NAMES_LIMIT = 20
 
 
-@tool
+@tool(
+	final_answer=True,
+	precheck=lambda args, context=None: _precheck_query(args),
+	route=lambda text: _route_count(text),
+)
 def count(doctype: DocTypeArg, filters: FiltersArg = None) -> dict[str, Any]:
-	"""Count records — use for "how many" questions. Returns {count, names}.
-
-	`names` holds the IDs of up to 20 matching records (newest first); pass exactly
-	these to read to show their details.
+	"""Count records — use for "how many" questions. The count and the matching records' IDs
+	(up to 20, newest first) are shown to the user directly.
 	"""
 	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*", "as": "count"}])
+	total = int(rows[0]["count"]) if rows else 0
 	# Real IDs up front: small models otherwise invent plausible-looking record names.
 	names = frappe.get_list(
 		doctype, filters=filters, pluck="name", order_by="creation desc", limit=COUNT_NAMES_LIMIT
 	)
-	return {"doctype": doctype, "count": int(rows[0]["count"]) if rows else 0, "names": names}
+	return {"doctype": doctype, "count": total, "names": names, "answer": _count_answer(doctype, total, names)}
+
+
+# "how many employees (are there)?" / "how many sales invoices in the system"
+COUNT_QUESTION = re.compile(
+	r"^\s*(?:how\s+many|count(?:\s+of)?(?:\s+the)?|number\s+of)\s+(?:total\s+)?(?P<what>[a-z][a-z \-]*?)"
+	r"(?:\s*[?.!,]*\s+(?:are|is|do|does|exist|exists|present|there|in|we|i|have)\b.*)?\s*[?.!]*\s*$",
+	re.IGNORECASE,
+)
+# "how to create a new employee?", "how do i add a sales order give me the steps",
+# "steps to create an item" — but not "create a todo with description X" (that's a create).
+HOW_TO_QUESTION = re.compile(
+	r"^\s*(?:how\s+(?:do|can|should)\s+(?:i|we|you)|how\s+to|steps\s+(?:to|for)|give\s+me\s+(?:the\s+)?steps\s+(?:to|for))\s+"
+	r"(?:create|add|make|enter|register|set\s+up|new)\s+(?:(?:a|an|the)\s+)?(?:new\s+)?(?P<what>[a-z][a-z \-]*?)"
+	r"(?:\s*[?.!,]*\s+(?:in|on|record|entry|give|with|step|steps|please)\b.*)?\s*[?.!]*\s*$",
+	re.IGNORECASE,
+)
+
+
+# "create a todo with description X", "add new customer named Y", "create one employee"
+CREATE_REQUEST = re.compile(
+	r"^\s*(?:please\s+)?(?:create|add|make|register|enter)\s+(?:(?:a|an|one|1|the|new)\s+)*(?P<rest>.+?)\s*[.!]*\s*$",
+	re.IGNORECASE | re.DOTALL,
+)
+VALUE_SEPARATORS = re.compile(r"\s*(?:[,;\n]|\band\b)\s*", re.IGNORECASE)
+
+
+def _route_create(text: str) -> dict[str, Any] | None:
+	"""A create request whose values all parse as "<field label> <value>" pairs of the DocType
+	(item-table fields included): the record, ready for create's checks and the approval card."""
+	parsed = _parse_create_request(text)
+	if not parsed or not parsed[1]:
+		return None
+	doctype, record = parsed
+	return {"doctype": doctype, "records": [record]}
+
+
+def _route_required_values(text: str) -> dict[str, Any] | None:
+	"""A create request naming only the DocType ("create one employee"): ask for the values."""
+	parsed = _parse_create_request(text)
+	if not parsed or parsed[1]:
+		return None
+	return {"doctype": parsed[0]}
+
+
+def _parse_create_request(text: str) -> tuple[str, dict[str, Any]] | None:
+	"""(DocType, record) for "create <doctype> [with|for] <label> <value>, ...", record empty when
+	no values are given; None when the DocType or any value part isn't recognised."""
+	match = CREATE_REQUEST.match(text or "")
+	if not match:
+		return None
+	words = match.group("rest").split()
+	for n in range(min(4, len(words)), 0, -1):
+		doctype = _doctype_from_phrase(" ".join(words[:n]).strip(":,;-"))
+		if doctype:
+			break
+	else:
+		return None
+	rest = " ".join(words[n:]).strip()
+	rest = re.sub(r"^(?:with|for|having|where|:|-)\s+", "", rest, flags=re.IGNORECASE)
+	if not rest or rest.lower() in ("please", "for me", "now"):
+		return doctype, {}
+	record = _parse_values(doctype, rest)
+	return (doctype, record) if record else None
+
+
+def _parse_values(doctype: str, text: str) -> dict[str, Any] | None:
+	"""Split "customer test, item X, quantity 3" into fields by matching each part's start to a
+	field label; item-table fields go into one row of their table. None if any part is unknown."""
+	meta = frappe.get_meta(doctype)
+	targets: list[tuple[str, str, str | None]] = []  # (label, fieldname, table fieldname)
+	for f in meta.fields:
+		if f.label and _editable(f):
+			targets.append((f.label.lower(), f.fieldname, None))
+	for table in meta.get_table_fields():
+		for f in frappe.get_meta(table.options).fields:
+			if f.label and _editable(f):
+				targets.append((f.label.lower(), f.fieldname, table.fieldname))
+	targets.sort(key=lambda t: len(t[0]), reverse=True)  # longest label wins ("item code" over "item")
+
+	record: dict[str, Any] = {}
+	for part in filter(None, (p.strip() for p in VALUE_SEPARATORS.split(text))):
+		lowered = part.lower()
+		for label, fieldname, table in targets:
+			if lowered.startswith(label) and (len(lowered) == len(label) or not lowered[len(label)].isalnum()):
+				value = re.sub(r"^\s*(?:is|=|:|as|named|of|to)?\s*", "", part[len(label) :]).strip(" :=\"'")
+				if not value:
+					return None
+				if table:
+					rows = record.setdefault(table, [{}])
+					rows[0].setdefault(fieldname, value)
+				else:
+					record.setdefault(fieldname, value)
+				break
+		else:
+			return None
+	return record
+
+
+def _route_count(text: str) -> dict[str, Any] | None:
+	match = COUNT_QUESTION.match(text)
+	doctype = match and _doctype_from_phrase(match.group("what"))
+	return {"doctype": doctype} if doctype else None
+
+
+def _route_creation_steps(text: str) -> dict[str, Any] | None:
+	match = HOW_TO_QUESTION.match(text)
+	doctype = match and _doctype_from_phrase(match.group("what"))
+	return {"doctype": doctype} if doctype else None
+
+
+def _doctype_from_phrase(phrase: str) -> str | None:
+	"""The readable, non-child DocType a phrase names, allowing plurals ("sales invoices",
+	"employees", "entries") and a trailing "record(s)". None unless it's an exact name."""
+	words = re.sub(r"\s+", " ", (phrase or "").strip().lower())
+	words = re.sub(r"\s+(records?|entries|documents?)$", "", words)
+	if not words:
+		return None
+	candidates = [words]
+	if words.endswith("ies"):
+		candidates.append(words[:-3] + "y")
+	if words.endswith("es"):
+		candidates.append(words[:-2])
+	if words.endswith("s"):
+		candidates.append(words[:-1])
+	names = _doctype_names()
+	for candidate in candidates:
+		doctype = names.get(candidate)
+		if doctype and frappe.has_permission(doctype, "read"):
+			return doctype
+	return None
+
+
+def _doctype_names() -> dict[str, str]:
+	"""lower-cased name -> name of every non-child DocType, cached for the request."""
+	cache = frappe.flags.flow_doctype_names
+	if cache is None:
+		cache = frappe.flags.flow_doctype_names = {
+			n.lower(): n for n in frappe.get_all("DocType", filters={"istable": 0}, pluck="name")
+		}
+	return cache
+
+
+def _count_answer(doctype: str, total: int, names: list[str]) -> str:
+	route = doctype.lower().replace(" ", "-")
+	if not total:
+		return f"There are no **{doctype}** records."
+	noun = doctype if total == 1 else f"{doctype} records"
+	lines = []
+	for name in names:
+		title = _display_name(doctype, name)
+		label = f"{name} — {title}" if title != name else name
+		lines.append(f"- [{label}](/desk/{route}/{name})")
+	more = f"\n…and {total - len(names)} more." if total > len(names) else ""
+	return (
+		f"There {'is' if total == 1 else 'are'} **{total}** {noun}:\n\n" + "\n".join(lines) + more
+		+ "\n\nAsk me for the details of any of them."
+	)
+
+
+def _display_name(doctype: str, name: str) -> str:
+	meta = frappe.get_meta(doctype)
+	for fieldname in (meta.title_field, f"{frappe.scrub(doctype)}_name"):
+		if fieldname and meta.has_field(fieldname):
+			value = frappe.db.get_value(doctype, name, fieldname)
+			if isinstance(value, str) and value.strip():
+				return value.strip()[:80]
+	return name
 
 
 KNOWLEDGE_SEARCH_SLUG = "search_knowledge"
@@ -898,7 +1217,12 @@ def _update_to_create(args: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
 		return None
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return None
-	if any(frappe.db.exists(doctype, {"name": n}) for n in names if isinstance(n, str)):
+	if any(frappe.db.exists(doctype, {"name": n}) or _records_titled(doctype, n) for n in names if isinstance(n, str)):
+		return None
+	# Only a complete new record: "close the todo X" (status only) is an update of a record
+	# the model named loosely, not a request to make one.
+	record = _normalize_values(doctype, dict(values))
+	if _missing_required_error(doctype, [record]):
 		return None
 	return "create", {"doctype": doctype, "records": [dict(values)]}
 
@@ -913,6 +1237,14 @@ def _precheck_names(args: dict[str, Any], context: str | None = None) -> str | N
 	doctype = args.get("doctype") or ""
 	if not frappe.db.exists("DocType", doctype):
 		return None  # let the tool report the unknown DocType
+	# A record named by its title ("Aditya" for HR-EMP-00003) resolves to its ID when exactly one matches.
+	resolved = []
+	for n in names:
+		if isinstance(n, str) and not frappe.db.exists(doctype, {"name": n}):
+			matches = _records_titled(doctype, n)
+			n = matches[0] if len(matches) == 1 else n
+		resolved.append(n)
+	args["names"] = names = resolved
 	missing = [n for n in names if not frappe.db.exists(doctype, {"name": n})]
 	if missing:
 		return (
@@ -1049,6 +1381,7 @@ WORD_PATTERN = re.compile(r"[\w@+-]+(?:\.[\w@+-]+)*")
 @tool(
 	requires_confirmation=True,
 	precheck=_precheck_create,
+	route=lambda text: _route_create(text),
 	confirm_prompt=lambda args: (
 		_("Create {0} {1} record(s):\n\n{2}").format(
 			len(args.get("records") or []),
@@ -1255,6 +1588,8 @@ BUILTIN_TOOLS: list[Tool] = [
 	find_doctypes,
 	describe,
 	creation_steps,
+	required_values,
+	small_talk,
 	error_diagnosis,
 	read,
 	count,

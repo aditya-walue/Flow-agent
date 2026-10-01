@@ -118,7 +118,26 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str, str], ...] = tuple(
 )
 
 
-@tool(final_answer=True)
+# Unmistakably an error report: a traceback, an exception name, or a typical Frappe message.
+ERROR_REPORT = re.compile(
+	r"traceback \(most recent call last\)|\b\w+(error|exception)\b|^\s*(error|message)\s*[:\n]"
+	r"|could not find|is mandatory|mandatory fields|not permitted|insufficient permission"
+	r"|not correctly configured|please (check|enter|select|set)\b|does not exist|not allowed to"
+	r"|cannot be (deleted|cancelled|empty)|duplicate entry|already exists|is not a valid"
+	r"|session expired|negative stock|insufficient stock",
+	re.IGNORECASE,
+)
+# Requests that mention an error but ask for something else ("how to ...", "create ...").
+NOT_A_REPORT = re.compile(r"^\s*(how|create|add|make|show|list|count|update|delete|set)\b", re.IGNORECASE)
+
+
+def _route_error(text: str) -> dict[str, Any] | None:
+	if NOT_A_REPORT.match(text) or not ERROR_REPORT.search(text):
+		return None
+	return {"error": text}
+
+
+@tool(final_answer=True, route=_route_error)
 def error_diagnosis(
 	error: Annotated[str, "The error message exactly as the user pasted it, including any traceback."],
 ) -> dict[str, Any]:

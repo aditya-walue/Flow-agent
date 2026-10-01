@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,11 @@ if TYPE_CHECKING:
 	from flow.knowledge import Knowledge
 
 DEFAULT_MAX_ITERATIONS = 20
+MAX_FAILED_STEPS = 2
+STUCK_MESSAGE = (
+	"Sorry, I couldn't put that request together correctly. Could you rephrase it, or say "
+	"which record and fields you mean?"
+)
 ERROR_MESSAGE_LIMIT = 500
 VALID_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
@@ -125,8 +131,8 @@ class Agent:
 		(text deltas, tool start/end markers, and a final `Done` carrying the `RunResult`)."""
 		messages = self._build_initial_messages(input)
 		if stream:
-			return self._loop_stream(messages)
-		return self._loop(messages)
+			return self._loop_stream(messages, route=True)
+		return self._loop(messages, route=True)
 
 	def resume(
 		self,
@@ -233,14 +239,20 @@ class Agent:
 		)
 
 	def _loop(
-		self, messages: list[dict[str, Any]], executed_calls: list[ToolCall] | None = None
+		self,
+		messages: list[dict[str, Any]],
+		executed_calls: list[ToolCall] | None = None,
+		*,
+		route: bool = False,
 	) -> RunResult:
 		tool_schemas = [t.to_dict() for t in self.tools] or None
 		executed_calls = executed_calls if executed_calls is not None else []
 		usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+		routed = self._routed_response(messages) if route else None
+		failed_streak = 0
 		for iteration in range(1, self.max_iterations + 1):
-			response = self.model.chat(messages, tools=tool_schemas)
+			response, routed = routed or self.model.chat(messages, tools=tool_schemas), None
 			_accumulate_usage(usage_total, response.usage)
 			messages.append(_assistant_message(response))
 
@@ -272,7 +284,12 @@ class Agent:
 					}
 				)
 
+			# Two steps in a row of nothing but malformed calls: the model is stuck; stop rather
+			# than spend the remaining iterations repeating it.
+			failed_streak = failed_streak + 1 if all(c.error for c in response.tool_calls) else 0
 			answer = None if questions else self._final_answer(results)
+			if answer is None and not questions and failed_streak >= MAX_FAILED_STEPS:
+				answer = STUCK_MESSAGE
 			if answer is not None:
 				messages.append({"role": "assistant", "content": answer})
 				return RunResult(
@@ -297,28 +314,23 @@ class Agent:
 		raise RuntimeError(f"Agent {self.name!r} exceeded max_iterations ({self.max_iterations})")
 
 	def _loop_stream(
-		self, messages: list[dict[str, Any]], executed_calls: list[ToolCall] | None = None
+		self,
+		messages: list[dict[str, Any]],
+		executed_calls: list[ToolCall] | None = None,
+		*,
+		route: bool = False,
 	) -> Generator[Event]:
 		tool_schemas = [t.to_dict() for t in self.tools] or None
 		executed_calls = executed_calls if executed_calls is not None else []
 		usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
+		routed = self._routed_response(messages) if route else None
+		failed_streak = 0
 		for iteration in range(1, self.max_iterations + 1):
-			chunks = self.model.chat(messages, tools=tool_schemas, stream=True)
-			# Tool calls are announced mid-stream (ToolCallBegin) so the UI shows the tool the moment
-			# the model starts it, before its arguments finish streaming.
-			try:
-				while True:
-					item = next(chunks)
-					if isinstance(item, ToolCallBegin):
-						yield ToolStarted(id=item.id, name=item.name, arguments={})
-					elif isinstance(item, str):
-						yield TextChunk(text=item)
-					else:
-						# Browser-model hand-off (flow.lib.webllm): relayed to the client as-is.
-						yield item
-			except StopIteration as e:
-				response = e.value
+			if routed is not None:
+				response, routed = routed, None
+			else:
+				response = yield from self._stream_model(messages, tool_schemas)
 			_accumulate_usage(usage_total, response.usage)
 			messages.append(_assistant_message(response))
 
@@ -353,7 +365,12 @@ class Agent:
 				messages.append({"role": "tool", "tool_call_id": call.id, "content": serialized})
 				yield ToolEnded(id=call.id, name=call.name, result=serialized)
 
+			# Two steps in a row of nothing but malformed calls: the model is stuck; stop rather
+			# than spend the remaining iterations repeating it.
+			failed_streak = failed_streak + 1 if all(c.error for c in response.tool_calls) else 0
 			answer = None if questions else self._final_answer(results)
+			if answer is None and not questions and failed_streak >= MAX_FAILED_STEPS:
+				answer = STUCK_MESSAGE
 			if answer is not None:
 				yield TextChunk(text=answer)
 				messages.append({"role": "assistant", "content": answer})
@@ -410,6 +427,44 @@ class Agent:
 				return None
 			answers.append(result["answer"])
 		return "\n\n".join(answers)
+
+	def _stream_model(
+		self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]] | None
+	) -> Generator[Event, None, ChatResponse]:
+		"""One streamed model call, relaying its events; returns the assembled response."""
+		chunks = self.model.chat(messages, tools=tool_schemas, stream=True)
+		# Tool calls are announced mid-stream (ToolCallBegin) so the UI shows the tool the moment
+		# the model starts it, before its arguments finish streaming.
+		try:
+			while True:
+				item = next(chunks)
+				if isinstance(item, ToolCallBegin):
+					yield ToolStarted(id=item.id, name=item.name, arguments={})
+				elif isinstance(item, str):
+					yield TextChunk(text=item)
+				else:
+					# Browser-model hand-off (flow.lib.webllm): relayed to the client as-is.
+					yield item
+		except StopIteration as e:
+			return e.value
+
+	def _routed_response(self, messages: list[dict[str, Any]]) -> ChatResponse | None:
+		"""A tool call for a user message one of the tools unmistakably answers (see Tool.route),
+		standing in for the model's first step."""
+		last = messages[-1] if messages else {}
+		if last.get("role") != "user" or not isinstance(last.get("content"), str):
+			return None
+		for tool in self.tools:
+			if not tool.route:
+				continue
+			try:
+				arguments = tool.route(last["content"])
+			except Exception:
+				arguments = None
+			if arguments:
+				call = ToolCall(id=f"route_{uuid.uuid4().hex[:12]}", name=tool.name, arguments=arguments)
+				return ChatResponse(content=None, tool_calls=[call])
+		return None
 
 	def _pending_calls(self, messages: list[dict[str, Any]]) -> list[ToolCall]:
 		"""Tool calls in the transcript that have no tool result yet (awaiting an answer)."""

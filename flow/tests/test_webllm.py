@@ -73,6 +73,26 @@ class TestPlainMessages(UnitTestCase):
 		self.assertEqual(out[0]["content"].count("<tool_response>"), 2)
 
 
+class TestMalformedCallRendering(UnitTestCase):
+	def test_malformed_call_is_shown_as_a_note_not_a_tool_example(self):
+		out = to_plain_messages(
+			[
+				{"role": "user", "content": "create a todo"},
+				{"role": "assistant", "content": None, "tool_calls": [
+					{"id": "x1", "type": "function", "function": {"name": "invalid_tool_call", "arguments": "{}"}}
+				]},
+				{"role": "tool", "tool_call_id": "x1", "content": '{"error": "The <tool_call> block was empty."}'},
+			],
+			None,
+		)
+		text = json.dumps(out)
+		self.assertNotIn("invalid_tool_call", text)
+		self.assertIn("(Your last tool call could not be read: The <tool_call> block was empty.)", out[-1]["content"])
+
+	def test_empty_block_says_so(self):
+		self.assertIn("was empty", parse_reply("<tool_call>\n", {}).tool_calls[0].error)
+
+
 class TestParseReply(UnitTestCase):
 	def test_plain_text(self):
 		response = parse_reply("Hello!", {"total_tokens": 3})
@@ -166,6 +186,9 @@ class TestBrowserRoundTrip(IntegrationTestCase):
 		webllm.submit_reply(request.id, {"error": "No WebGPU"})
 		with self.assertRaisesRegex(RuntimeError, "No WebGPU"):
 			next(stream)
+
+	def test_late_reply_to_finished_request_is_ignored_quietly(self):
+		self.assertFalse(webllm.submit_reply("no-such-request", {"content": "late"}))
 
 	def test_other_user_cannot_answer(self):
 		stream = Model(model_id="webllm/some-model").chat("hi", stream=True)

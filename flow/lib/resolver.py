@@ -61,6 +61,7 @@ def _resolve_module(doc: FlowTool) -> Tool:
 			precheck=obj.precheck,
 			final_answer=obj.final_answer,
 			redirect=obj.redirect,
+			route=obj.route,
 		)
 	if callable(obj):
 		return _build_tool(doc, build_schema(obj), obj)
@@ -84,6 +85,7 @@ def _build_tool(
 	precheck: Any = None,
 	final_answer: bool = False,
 	redirect: Any = None,
+	route: Any = None,
 ) -> Tool:
 	return Tool(
 		name=doc.slug,
@@ -95,6 +97,7 @@ def _build_tool(
 		precheck=precheck,
 		final_answer=final_answer,
 		redirect=redirect,
+		route=route,
 	)
 
 

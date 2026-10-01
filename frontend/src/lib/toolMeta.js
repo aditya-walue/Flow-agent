@@ -38,6 +38,8 @@ const LABELS = {
 	count: "Counting Records",
 	creation_steps: "Preparing Steps",
 	error_diagnosis: "Diagnosing Error",
+	small_talk: "Replying",
+	required_values: "Checking Required Fields",
 	search_knowledge: "Searching Knowledge",
 	execute: "Executing",
 	create: "Creating Records",

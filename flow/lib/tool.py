@@ -42,6 +42,9 @@ class Tool:
 	# Re-routes a call the model sent to the wrong tool: returns (tool name, arguments) to run
 	# instead, or None. E.g. an update of records that don't exist is a create.
 	redirect: Callable[[dict[str, Any]], tuple[str, dict[str, Any]] | None] | None = None
+	# Recognises a user message this tool unmistakably answers ("how many employees?") and
+	# returns the arguments to call it with, or None. Routed calls skip the model's guess.
+	route: Callable[[str], dict[str, Any] | None] | None = None
 
 	def __post_init__(self) -> None:
 		self._validated = validate_call(config=ConfigDict(arbitrary_types_allowed=True))(self.func)
@@ -82,6 +85,7 @@ def tool(
 	precheck: Callable[[dict[str, Any], str | None], str | None] | None = None,
 	final_answer: bool = False,
 	redirect: Callable[[dict[str, Any]], tuple[str, dict[str, Any]] | None] | None = None,
+	route: Callable[[str], dict[str, Any] | None] | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
 	def wrap(f: Callable[..., Any]) -> Tool:
 		if not callable(f):
@@ -96,6 +100,7 @@ def tool(
 			precheck=precheck,
 			final_answer=final_answer,
 			redirect=redirect,
+			route=route,
 		)
 
 	return wrap(func) if func is not None else wrap

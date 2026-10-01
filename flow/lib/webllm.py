@@ -31,6 +31,8 @@ from frappe import _
 from flow.lib.model import ChatResponse, ToolCall, _build_tool_call
 
 BROWSER_PROVIDER = "webllm"
+# Name given to a tool call whose block couldn't be parsed (see to_plain_messages).
+INVALID_CALL = "invalid_tool_call"
 # Keep in sync with DEFAULT_CONTEXT_WINDOW in frontend/src/lib/webllm.js.
 DEFAULT_CONTEXT_WINDOW = 16384
 
@@ -97,13 +99,19 @@ def chat_stream(
 	return parse_reply(reply.get("content") or "", reply.get("usage") or {})
 
 
-def submit_reply(request_id: str, reply: dict[str, Any]) -> None:
-	"""Store the browser's reply for the waiting stream. Only the user the request was
-	issued to may answer it."""
+def submit_reply(request_id: str, reply: dict[str, Any]) -> bool:
+	"""Store the browser's reply for the waiting stream; False if nothing is waiting any more.
+
+	A reply can outlive its request harmlessly — the run was stopped, timed out, or the server
+	restarted mid-turn — so that is reported quietly rather than raised (which the desk would
+	show as an error dialog). Answering another user's request is still refused."""
 	owner = frappe.cache.get_value(_owner_key(request_id), use_local_cache=False)
+	if owner is None:
+		return False
 	if owner != frappe.session.user:
-		frappe.throw(_("Unknown or expired model request."), frappe.PermissionError)
+		frappe.throw(_("Not permitted to answer this model request."), frappe.PermissionError)
 	frappe.cache.set_value(_reply_key(request_id), reply, expires_in_sec=300)
+	return True
 
 
 def _wait_for_reply(request_id: str) -> Generator[Heartbeat, None, dict[str, Any]]:
@@ -140,6 +148,15 @@ def to_plain_messages(
 		else:
 			out.append({"role": role, "content": content})
 
+	# A call that couldn't be parsed is shown back as a plain note, never as a call to a tool
+	# named "invalid_tool_call" — a small model copies that example and keeps calling it.
+	malformed = {
+		tc["id"]
+		for m in messages
+		if m.get("role") == "assistant"
+		for tc in m.get("tool_calls") or []
+		if tc["function"]["name"] == INVALID_CALL
+	}
 	for message in messages:
 		role = message.get("role")
 		content = _text(message.get("content"))
@@ -158,8 +175,13 @@ def to_plain_messages(
 				)
 				+ "\n</tool_call>"
 				for tc in message.get("tool_calls") or []
+				if tc["id"] not in malformed
 			]
-			add("assistant", "\n".join(filter(None, [content, *calls])))
+			text = "\n".join(filter(None, [content, *calls]))
+			if text:
+				add("assistant", text)
+		elif role == "tool" and message.get("tool_call_id") in malformed:
+			add("user", f"(Your last tool call could not be read: {_error_text(content)})")
 		elif role == "tool":
 			add("user", f"<tool_response>\n{content}\n</tool_response>")
 
@@ -170,6 +192,13 @@ def to_plain_messages(
 	return out
 
 
+def _error_text(content: str) -> str:
+	try:
+		return json.loads(content).get("error") or content
+	except (ValueError, AttributeError):
+		return content
+
+
 def parse_reply(text: str, usage: dict[str, Any]) -> ChatResponse:
 	"""Split a browser model's raw reply into prose and `<tool_call>` blocks."""
 	tool_calls: list[ToolCall] = []
@@ -177,13 +206,14 @@ def parse_reply(text: str, usage: dict[str, Any]) -> ChatResponse:
 		call_id = f"call_{frappe.generate_hash(length=12)}"
 		payload = _loads_lenient(raw)
 		if not isinstance(payload, dict) or not isinstance(payload.get("name"), str):
+			problem = f"Malformed <tool_call> block: {raw[:200]}." if raw.strip() else "The <tool_call> block was empty."
 			tool_calls.append(
 				ToolCall(
 					id=call_id,
-					name="invalid_tool_call",
+					name=INVALID_CALL,
 					arguments={},
-					error=f"Malformed <tool_call> block: {raw[:200]}. Resend it as "
-					'{"name": ..., "arguments": {...}} inside <tool_call></tool_call>.',
+					error=f"{problem} Write it as <tool_call>"
+					'{"name": "<tool name>", "arguments": {...}}</tool_call>.',
 				)
 			)
 			continue

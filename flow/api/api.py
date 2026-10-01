@@ -181,7 +181,7 @@ def submit_browser_reply(
 			usage = json.loads(usage)
 		except ValueError:
 			usage = None
-	submit_reply(
+	delivered = submit_reply(
 		request_id.strip(),
 		{
 			"content": content if isinstance(content, str) else None,
@@ -189,7 +189,7 @@ def submit_browser_reply(
 			"usage": usage if isinstance(usage, dict) else {},
 		},
 	)
-	return {"ok": True}
+	return {"ok": delivered}
 
 
 @frappe.whitelist()

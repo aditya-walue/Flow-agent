@@ -7,18 +7,6 @@ import "@/index.css";
 const PANEL_WIDTH = 420;
 const MIN_WIDTH = 360;
 
-// The panel lives on the desk home only — the workspace pages (/desk redirects to the
-// default workspace, e.g. /desk/home). A launcher bubble opens it there, and it closes
-// when the user navigates to a form, list, report, etc.
-function onDeskHome() {
-	const route = frappe.router?.current_route;
-	if (route) return !route[0] || route[0] === "Workspaces";
-	// Router hasn't parsed the URL yet (the panel mounts on app_ready): classify the path.
-	const [prefix, first] = window.location.pathname.split("/").filter(Boolean);
-	if (!["desk", "app"].includes(prefix)) return false;
-	return !first || first === "private" || Boolean(frappe.workspaces?.[first]);
-}
-
 // Same mark as BrandMark.vue; the launcher sits outside #flow-root, so no Vue/CSS here.
 const LAUNCHER_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 	<path d="M12 2.5l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.9L12 2.5z" />
@@ -31,9 +19,7 @@ const LAUNCHER_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="cur
 class FlowPanel {
 	constructor() {
 		const saved = readPanelState();
-		// The saved open state is the user's choice; it only shows while on the desk home.
-		this._wantOpen = Boolean(saved.open);
-		this.visible = this._wantOpen && onDeskHome();
+		this.visible = Boolean(saved.open);
 		this._halfWidth = saved.width || PANEL_WIDTH;
 		// Fullscreen is the default mode; a saved preference wins on reload.
 		this._initialFullscreen = saved.fullscreen ?? true;
@@ -42,7 +28,6 @@ class FlowPanel {
 		this._addLauncher();
 		this._syncTheme();
 		this._registerShortcut();
-		frappe.router.on("change", () => this._syncRoute());
 
 		watch(this.store.sessionName, () => this._persist());
 	}
@@ -122,8 +107,8 @@ class FlowPanel {
 		});
 	}
 
-	// Chat-bubble button in the bottom-right corner, stacked above any other site widget
-	// that sits in the corner itself. Hidden while the panel is open and off the desk home.
+	// Chat-bubble button in the bottom-right corner of every desk page, stacked above any
+	// other site widget that sits in the corner itself. Hidden while the panel is open.
 	_addLauncher() {
 		const button = document.createElement("button");
 		button.type = "button";
@@ -158,15 +143,7 @@ class FlowPanel {
 	}
 
 	_syncLauncher() {
-		this.launcher.hidden = this.visible || !onDeskHome();
-	}
-
-	// Leaving the desk home closes the panel without forgetting that it was open, so
-	// it comes back when the user returns home.
-	_syncRoute() {
-		const shouldShow = this._wantOpen && onDeskHome();
-		if (shouldShow !== this.visible) this._setVisible(shouldShow);
-		this._syncLauncher();
+		this.launcher.hidden = this.visible;
 	}
 
 	// Mirror the desk's light/dark theme onto the panel root so scoped tokens
@@ -186,22 +163,19 @@ class FlowPanel {
 	_registerShortcut() {
 		frappe.ui.keys.add_shortcut({
 			shortcut: "ctrl+i",
-			action: () => onDeskHome() && this.toggle(),
+			action: () => this.toggle(),
 			description: __("Toggle Flow panel"),
 			ignore_inputs: true,
 		});
 	}
 
 	show() {
-		if (!onDeskHome()) return;
-		this._wantOpen = true;
 		this._setVisible(true);
 		this.store.restoreSession();
 		this._persist();
 	}
 
 	hide() {
-		this._wantOpen = false;
 		this._setVisible(false);
 		this._persist();
 	}
@@ -227,7 +201,7 @@ class FlowPanel {
 
 	_persist() {
 		writePanelState({
-			open: this._wantOpen,
+			open: this.visible,
 			fullscreen: this.fullscreen,
 			width: this._halfWidth,
 			session: this.store.sessionName.value,

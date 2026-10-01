@@ -371,7 +371,8 @@ class TestCreationSteps(IntegrationTestCase):
 		model.chat.return_value = ChatResponse(
 			content=None, tool_calls=[ToolCall(id="c1", name="creation_steps", arguments={"doctype": "ToDo"})]
 		)
-		result = Agent(model=model, tools=[creation_steps]).run("how do I add a todo?")
+		# Phrased so no route matches: the model picks the tool itself.
+		result = Agent(model=model, tools=[creation_steps]).run("explain adding a todo")
 
 		self.assertEqual(model.chat.call_count, 1)
 		self.assertEqual(result.output, creation_steps(doctype="ToDo")["answer"])
@@ -591,3 +592,110 @@ class TestUpdateRedirect(IntegrationTestCase):
 		values = _normalize_values("User", {"user_name": "someone@example.com", "first_name": "A"})
 		self.assertEqual(values, {"email": "someone@example.com", "first_name": "A"})
 
+
+
+class TestRouting(IntegrationTestCase):
+	def test_routes_recognise_unmistakable_requests(self):
+		from flow.tools.builtins import _route_count, _route_creation_steps
+		from flow.tools.diagnosis import _route_error
+
+		self.assertEqual(_route_count("how many ToDos are there?"), {"doctype": "ToDo"})
+		self.assertIsNone(_route_count("how many people work here"))
+		self.assertEqual(_route_creation_steps("how to add new todo? give me the steps"), {"doctype": "ToDo"})
+		self.assertEqual(_route_creation_steps("steps to create an note"), {"doctype": "Note"})
+		self.assertIsNone(_route_creation_steps("create a todo with description call vendor"))
+		self.assertEqual(_route_error("Could not find Row #1: Item: X"), {"error": "Could not find Row #1: Item: X"})
+		self.assertIsNone(_route_error("how to create new todo?"))
+
+	def test_routed_request_skips_the_model(self):
+		from unittest.mock import MagicMock
+
+		from flow.lib.agent import Agent
+
+		model = MagicMock()
+		result = Agent(model=model, tools=[count, creation_steps]).run("how many ToDos are there?")
+		model.chat.assert_not_called()
+		self.assertIn("ToDo", result.output)
+
+	def test_stuck_model_stops_after_two_malformed_steps(self):
+		from unittest.mock import MagicMock
+
+		from flow.lib.agent import STUCK_MESSAGE, Agent
+		from flow.lib.model import ChatResponse, ToolCall
+
+		model = MagicMock()
+		model.chat.side_effect = lambda *a, **k: ChatResponse(
+			content=None, tool_calls=[ToolCall(id=frappe.generate_hash(length=6), name="invalid_tool_call", arguments={}, error="bad")]
+		)
+		result = Agent(model=model, tools=[count]).run("do something odd")
+		self.assertEqual(result.output, STUCK_MESSAGE)
+		self.assertEqual(model.chat.call_count, 2)
+
+
+class TestQueryCleanup(IntegrationTestCase):
+	def test_options_operators_and_labels_are_tidied(self):
+		from flow.tools.builtins import _precheck_query
+
+		args = {"doctype": "ToDo", "filters": {"order_by": "creation desc", "Priority": ["eq", "High"], "description": ["contains", "call"]}, "order_by": None}
+		self.assertIsNone(_precheck_query(args))
+		self.assertEqual(args["order_by"], "creation desc")
+		self.assertEqual(args["filters"], {"priority": ["=", "High"], "description": ["like", "%call%"]})
+
+	def test_unknown_filter_field_is_named(self):
+		from flow.tools.builtins import _precheck_query
+
+		self.assertIn("'priorty'", _precheck_query({"doctype": "ToDo", "filters": {"priorty": "High"}}))
+
+	def test_read_without_fields_returns_key_columns(self):
+		frappe.get_doc({"doctype": "ToDo", "description": "key columns probe"}).insert()
+		rows = read(doctype="ToDo", filters={"description": "key columns probe"})
+		self.assertIn("status", rows[0])
+		frappe.db.rollback()
+
+
+class TestCreateRouting(IntegrationTestCase):
+	def test_values_parse_into_fields_and_item_rows(self):
+		from flow.tools.builtins import _route_create
+
+		self.assertEqual(
+			_route_create("create a todo with description call vendor, priority High"),
+			{"doctype": "ToDo", "records": [{"description": "call vendor", "priority": "High"}]},
+		)
+		self.assertIsNone(_route_create("create a todo for HR-00003"))  # unknown part: model decides
+
+	def test_request_without_values_asks_for_them(self):
+		from flow.lib.agent import Agent
+		from flow.tools.builtins import required_values
+		from unittest.mock import MagicMock
+
+		model = MagicMock()
+		result = Agent(model=model, tools=[create, required_values]).run("create one todo")
+		model.chat.assert_not_called()
+		self.assertIn("To create a new **ToDo**, I need:", result.output)
+		self.assertIn("**Description**", result.output)
+
+	def test_routed_create_still_asks_for_approval(self):
+		from flow.lib.agent import Agent
+		from unittest.mock import MagicMock
+
+		result = Agent(model=MagicMock(), tools=[create]).run("create a todo with description route probe")
+		self.assertTrue(result.paused)
+		self.assertIn("route probe", result.questions[0].prompt)
+
+
+class TestSmallTalk(IntegrationTestCase):
+	def test_greetings_and_thanks_route_without_the_model(self):
+		from unittest.mock import MagicMock
+
+		from flow.lib.agent import Agent
+		from flow.tools.builtins import _route_small_talk, small_talk
+
+		for text in ("hii", "Hello!", "hey there", "good morning"):
+			self.assertEqual(_route_small_talk(text), {"kind": "greeting"}, text)
+		self.assertEqual(_route_small_talk("thank you so much"), {"kind": "thanks"})
+		self.assertIsNone(_route_small_talk("hi, how many employees are there?"))
+
+		model = MagicMock()
+		result = Agent(model=model, tools=[small_talk, count]).run("hii")
+		model.chat.assert_not_called()
+		self.assertIn("**Count** records", result.output)
