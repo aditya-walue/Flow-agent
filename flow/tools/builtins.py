@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal
+import re
+from typing import Annotated, Any, Literal
 
 import frappe
 from frappe import _
@@ -32,12 +33,31 @@ def _summarize_values(values: dict) -> str:
 	return json.dumps(display, indent=2, default=str, ensure_ascii=False)
 
 
-@tool
-def find_doctypes(search: str | None = None, module: str | None = None, limit: int = 40) -> list[dict]:
-	"""Find exact DocType names before describe/read — never guess names.
+# Parameter types shared by the tools below. The description travels with each parameter
+# in the schema the model sees — small models lean on these far more than on the tool text.
+DocTypeArg = Annotated[str, 'Exact DocType name, e.g. "Sales Invoice", "Customer", "Item".']
+NamesArg = Annotated[
+	list[str],
+	'Record IDs, e.g. ["ACC-SINV-2026-00008"]. Take them from count/read results — never make them up.',
+]
+FiltersArg = Annotated[
+	dict | None,
+	'Field conditions, e.g. {"status": "Paid"}, {"grand_total": [">", 1000]}, '
+	'{"name": ["in", ["ID-1", "ID-2"]]}. Omit for all records.',
+]
 
-	Search by keyword (substring of the name) and/or filter by module. Returns a list
-	of {name, module} you can read. Child tables are excluded; single DocTypes are included.
+
+@tool
+def find_doctypes(
+	search: Annotated[str | None, 'Part of the DocType name, e.g. "invoice" or "sales order".'] = None,
+	module: Annotated[str | None, 'Module filter, e.g. "Selling". Omit unless you are sure.'] = None,
+	limit: Annotated[int, "Max results (default 40)."] = 40,
+) -> list[dict]:
+	"""Find the exact name of a DocType (a record type / table), e.g. "Sales Order".
+
+	Use when you are unsure of a DocType's exact name. Returns [{name, module}].
+	These are types, not records: one result does not mean one record exists —
+	use count or read for records.
 	"""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
 	filters: dict[str, Any] = {"istable": 0}
@@ -46,12 +66,29 @@ def find_doctypes(search: str | None = None, module: str | None = None, limit: i
 	if search:
 		filters["name"] = ["like", f"%{search}%"]
 	rows = frappe.get_all("DocType", filters=filters, fields=["name", "module"], order_by="name", limit=limit)
+	if not rows and module and search:
+		# Models often guess the module wrong (Sales Order under "Stock"); an empty result then
+		# reads as "doesn't exist". The name match alone is the stronger signal.
+		del filters["module"]
+		rows = frappe.get_all("DocType", filters=filters, fields=["name", "module"], order_by="name", limit=limit)
 	return [r for r in rows if frappe.has_permission(r["name"], "read")]
 
 
 @tool
-def describe(doctype: str, name: str | None = None) -> dict[str, Any]:
-	"""Inspect a DocType's fields and your permissions. Pass `name` to also get a record's available actions."""
+def describe(
+	doctype: DocTypeArg,
+	name: Annotated[
+		str | None,
+		"A record ID, only to list that record's actions (submit, cancel, ...). Never the DocType name.",
+	] = None,
+) -> dict[str, Any]:
+	"""Get a DocType's fields (fieldname, label, type, required, options), your permissions,
+	whether it is submittable, and its active workflow.
+
+	Use before create/update and to answer "how do I create X" with the real required fields.
+	Link fields hold the name of a record of their `options` DocType; Table fields hold a list
+	of row objects of their `options` DocType. Does not return record values — use read.
+	"""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 
@@ -68,9 +105,25 @@ def describe(doctype: str, name: str | None = None) -> dict[str, Any]:
 		if f.fieldtype not in LAYOUT_FIELDTYPES
 	]
 	permissions = {p: bool(frappe.has_permission(doctype, p)) for p in ("read", "write", "create", "delete")}
-	result: dict[str, Any] = {"doctype": doctype, "fields": fields, "permissions": permissions}
+	result: dict[str, Any] = {
+		"doctype": doctype,
+		"fields": fields,
+		"permissions": permissions,
+		# Shape the user-facing steps: submittable docs need Submit after Save; a workflow adds approvals.
+		"submittable": bool(meta.is_submittable),
+		"workflow": frappe.db.get_value(
+			"Workflow", {"document_type": doctype, "is_active": 1}, "workflow_name"
+		),
+	}
 
 	if name:
+		# Dict form: `exists(dt, dt)` short-circuits as a Single-doctype check and returns truthy.
+		if not meta.issingle and not frappe.db.exists(doctype, {"name": name}):
+			# Spell out the fix: the usual mistake is passing the DocType (or its label) as `name`.
+			raise ValueError(
+				f"No {doctype} record named {name!r}. `name` must be a record ID; "
+				f'find IDs with read(doctype="{doctype}", fields=["name"]).'
+			)
 		if not frappe.has_permission(doctype, "read", name):
 			raise PermissionError(f"No permission to read {doctype} {name}")
 		doc = frappe.get_doc(doctype, name)
@@ -82,16 +135,19 @@ def describe(doctype: str, name: str | None = None) -> dict[str, Any]:
 
 @tool
 def read(
-	doctype: str,
-	filters: dict | None = None,
-	fields: list[str] | None = None,
-	limit: int = 20,
-	order_by: str | None = None,
+	doctype: DocTypeArg,
+	filters: FiltersArg = None,
+	fields: Annotated[
+		list[str] | None,
+		'Fieldnames to return, e.g. ["name", "customer", "grand_total", "status"]. Default ["name"].',
+	] = None,
+	limit: Annotated[int, "Max records (default 20, max 200)."] = 20,
+	order_by: Annotated[str | None, 'e.g. "creation desc" or "grand_total desc".'] = None,
 ) -> list[dict]:
-	"""Read records from a DocType, honouring the user's permissions.
+	"""Get records and their field values. Returns a list of {field: value}.
 
-	`filters` is a dict like {"status": "Open"} or {"qty": [">", 5]}. `fields` defaults
-	to the record name. Returns a list of matching records (capped at 200).
+	Use to list records or show details. To see specific records, filter by name:
+	filters={"name": ["in", [IDs from count/read]]}. Fieldnames come from describe.
 	"""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
 	return frappe.get_list(
@@ -101,6 +157,255 @@ def read(
 		limit=limit,
 		order_by=order_by,
 	)
+
+
+# Required fields ERPNext/Frappe fill in themselves on a new form — listing them as steps
+# would send the user hunting for fields they never touch.
+AUTO_FILLED_FIELDS = frozenset(
+	{
+		"naming_series",
+		"currency",
+		"conversion_rate",
+		"plc_conversion_rate",
+		"price_list_currency",
+		"selling_price_list",
+		"buying_price_list",
+		"item_name",
+		"uom",
+		"stock_uom",
+		"conversion_factor",
+		# Computed from the other amounts and the currencies.
+		"source_exchange_rate",
+		"target_exchange_rate",
+		# Accounts and cost centre default from the Company / Item settings.
+		"debit_to",
+		"credit_to",
+		"income_account",
+		"expense_account",
+		"cost_center",
+	}
+)
+# Line-item fields users always fill, even where the row doesn't strictly require them
+# (a Sales Invoice row allows free-text lines, so its Item Code is optional).
+KEY_ROW_FIELDS = ("item_code", "qty", "rate")
+# How many of a Link field's records the steps show as choices / examples.
+LINK_EXAMPLES = 3
+
+
+@tool(final_answer=True)
+def creation_steps(doctype: DocTypeArg) -> dict[str, Any]:
+	"""Step-by-step guide for creating a record of a DocType by hand in the desk, built from
+	this site's real required fields. Use for "how do I create/add X" questions. The guide is
+	shown to the user directly. Does not create anything.
+	"""
+	if not frappe.has_permission(doctype, "read"):
+		raise PermissionError(f"No permission to read {doctype}")
+	meta = frappe.get_meta(doctype)
+	route = doctype.lower().replace(" ", "-")
+	date_format = frappe.db.get_single_value("System Settings", "date_format") or "yyyy-mm-dd"
+
+	steps = [
+		f"Open [New {doctype}](/desk/{route}/new), or search **{doctype}** in the search bar "
+		f"and click **+ Add {doctype}**."
+	]
+	fields = _user_filled(meta)
+	conditional = _conditionally_required(meta)
+	important = _important_fields(meta, exclude={f.fieldname for f in fields + conditional})
+	if fields:
+		steps.append("Fill in the required fields:\n" + _bullets(fields, date_format))
+	if conditional:
+		steps.append("Required in some cases (the form marks them when they apply):\n" + _bullets(conditional, date_format))
+	if important:
+		steps.append("Usually also needed:\n" + _bullets(important, date_format))
+	for table in meta.get_table_fields():
+		if not table.reqd:
+			continue
+		child_meta = frappe.get_meta(table.options)
+		key = [child_meta.get_field(f) for f in KEY_ROW_FIELDS if child_meta.get_field(f)]
+		cols = key + [f for f in _user_filled(child_meta) if f.fieldname not in KEY_ROW_FIELDS]
+		cols += _important_fields(child_meta, exclude={f.fieldname for f in cols}, limit=2)
+		steps.append(
+			f"In the **{table.label}** table, add a row for each entry and fill:\n" + _bullets(cols, date_format)
+		)
+	steps.append("Click **Save** (Ctrl+S).")
+	if meta.is_submittable:
+		steps.append("Click **Submit** to finalise it. A submitted record can only be cancelled, not edited.")
+	workflow = frappe.db.get_value("Workflow", {"document_type": doctype, "is_active": 1}, "workflow_name")
+	if workflow:
+		steps.append(f"Move it through the **{workflow}** workflow using the **Actions** button.")
+
+	numbered = "\n".join(f"{i}. {step}" for i, step in enumerate(steps, 1))
+	answer = (
+		f"**How to create a new {doctype}**\n\n{numbered}\n\n"
+		"All other fields are optional. Want me to create one for you? Just give me the values."
+	)
+	return {"doctype": doctype, "answer": answer}
+
+
+def _label_of(doctype: str, fieldname: str) -> str:
+	field = frappe.get_meta(doctype).get_field(fieldname)
+	return (field.label if field else None) or fieldname
+
+
+def _bullets(fields: list[Any], date_format: str) -> str:
+	return "\n".join(f"   - {_field_hint(f, date_format)}" for f in fields)
+
+
+def _editable(f: Any) -> bool:
+	return (
+		f.fieldtype not in LAYOUT_FIELDTYPES
+		and f.fieldtype not in ("Table", "Table MultiSelect", "Check", "Button", "HTML", "Image")
+		and not (f.hidden or f.read_only or f.fetch_from)
+		and f.fieldname not in AUTO_FILLED_FIELDS
+	)
+
+
+def _shown_on_new(meta: Any, field: Any) -> bool:
+	"""Whether a field is visible on a fresh form, by evaluating its `depends_on` against a new
+	record with its defaults (Sales Order's Delivery Date: `!doc.skip_delivery_note` -> shown;
+	a Payment Entry's cheque number: `doc.paid_from && doc.paid_to` -> hidden). The JS-style
+	expression is translated for safe_eval; anything that won't evaluate counts as shown."""
+	return _holds_on_new(meta, field.depends_on)
+
+
+def _holds_on_new(meta: Any, condition: str | None) -> bool:
+	"""Evaluate a form condition (`depends_on` style: a fieldname or `eval:<JS>`) against a new
+	record's defaults. Empty or unevaluable conditions count as true."""
+	condition = (condition or "").strip()
+	if not condition:
+		return True
+	doc = _new_doc_values(meta.name)
+	if not condition.startswith("eval:"):
+		return bool(doc.get(condition))
+	expr = condition[len("eval:") :].replace("?.", ".")
+	expr = re.sub(r"\.length\b", "", expr)  # list/str truthiness stands in for .length
+	for js, py in (("===", "=="), ("!==", "!="), ("&&", " and "), ("||", " or ")):
+		expr = expr.replace(js, py)
+	expr = re.sub(r"!(?!=)", " not ", expr)
+	expr = re.sub(r"\btrue\b", "True", re.sub(r"\bfalse\b", "False", expr))
+	expr = re.sub(r"\b(null|undefined)\b", "None", expr)
+	try:
+		return bool(
+			frappe.safe_eval(
+				expr.strip(), None, {"doc": doc, "in_list": lambda options, value: value in options}
+			)
+		)
+	except Exception:
+		return True
+
+
+def _new_doc_values(doctype: str) -> Any:
+	"""A new record's default values, cached for the request."""
+	cache = frappe.flags.flow_new_doc_values = frappe.flags.flow_new_doc_values or {}
+	if doctype not in cache:
+		try:
+			cache[doctype] = frappe._dict(frappe.new_doc(doctype).as_dict())
+		except Exception:
+			cache[doctype] = frappe._dict()
+	return cache[doctype]
+
+
+def _conditionally_required(meta: Any) -> list[Any]:
+	"""Fields made mandatory by a condition (`mandatory_depends_on`), e.g. an Address Title
+	when no link is set, or a Lead's First Name when there is no Company Name."""
+	# Skipped when the field is itself hidden behind a display condition (POS-only times,
+	# cheque details for bank payments): those surface on the form once they apply.
+	return [
+		f
+		for f in meta.fields
+		if f.mandatory_depends_on
+		and not f.reqd
+		and _editable(f)
+		and _shown_on_new(meta, f)
+		# Required on a typical new record: a Lead's First Name (no Company Name yet) is,
+		# an Item's Shelf Life (only for batch items with expiry) is not.
+		and _holds_on_new(meta, f.mandatory_depends_on)
+	]
+
+
+def _important_fields(meta: Any, exclude: set[str], limit: int = 4) -> list[Any]:
+	"""Optional fields the DocType flags as prominent (shown in its list view, or bold) — the
+	usual home of fields enforced in code rather than marked required, like a Sales Order's
+	Delivery Date or a Payment Entry's Party."""
+	picked = [
+		f
+		for f in meta.fields
+		if (f.in_list_view or f.bold)
+		and not f.reqd
+		and not f.default
+		and f.fieldname not in exclude
+		and f.fieldtype not in ("Currency", "Float", "Int", "Percent")  # totals, usually computed
+		and (f.fieldtype == "Dynamic Link" or _shown_on_new(meta, f))  # hidden on a fresh form
+		and _editable(f)
+	][:limit]
+	# A Dynamic Link is meaningless without the field naming its DocType (Party -> Party Type).
+	for f in list(picked):
+		if f.fieldtype == "Dynamic Link" and f.options not in exclude:
+			companion = meta.get_field(f.options)
+			if companion and companion not in picked:
+				picked.insert(picked.index(f), companion)
+	return picked
+
+
+def _user_filled(meta: Any) -> list[Any]:
+	"""Required fields the user has to fill on a new record (no default, not auto-filled)."""
+	return [
+		f
+		for f in meta.fields
+		if f.reqd
+		and f.fieldtype not in LAYOUT_FIELDTYPES
+		and f.fieldtype not in ("Table", "Table MultiSelect")
+		and not (f.hidden or f.read_only or f.default or f.fetch_from)
+		and f.fieldname not in AUTO_FILLED_FIELDS
+	]
+
+
+def _field_hint(field: Any, date_format: str = "yyyy-mm-dd") -> str:
+	"""A field's bold label plus, where useful, the values it accepts."""
+	label = f"**{field.label or field.fieldname}**"
+	if field.fieldtype == "Select" and field.options:
+		choices = [o for o in field.options.split("\n") if o.strip()]
+		return f"{label}: one of {', '.join(choices)}"
+	if field.fieldtype == "Dynamic Link" and field.options:
+		return f"{label}: a record of the type chosen in **{_label_of(field.parent, field.options)}**"
+	if field.fieldtype == "Link" and field.options == "DocType":
+		return f"{label}: a document type, e.g. Customer"
+	if field.fieldtype == "Link" and field.options:
+		target = frappe.get_meta(field.options)
+		leaf_only = {"is_group": 0} if target.is_tree and target.has_field("is_group") else None
+		names = frappe.get_all(
+			field.options, filters=leaf_only, pluck="name", order_by="creation asc", limit=LINK_EXAMPLES + 1
+		)
+		if len(names) == 1:
+			return f"{label}: {names[0]}"
+		if names and len(names) <= LINK_EXAMPLES:
+			return f"{label}: one of {', '.join(names)}"
+		if names:
+			return f"{label}: pick from the list, e.g. {', '.join(names[:LINK_EXAMPLES])}"
+		return f"{label}: pick an existing {field.options}"
+	if field.fieldtype in ("Date", "Datetime"):
+		return f"{label}: a date ({date_format})"
+	if field.fieldtype == "Data" and field.options in ("Email", "Phone", "URL"):
+		return f"{label}: {'a phone number' if field.options == 'Phone' else 'an ' + field.options.lower() if field.options == 'Email' else 'a URL'}"
+	return label
+
+
+COUNT_NAMES_LIMIT = 20
+
+
+@tool
+def count(doctype: DocTypeArg, filters: FiltersArg = None) -> dict[str, Any]:
+	"""Count records — use for "how many" questions. Returns {count, names}.
+
+	`names` holds the IDs of up to 20 matching records (newest first); pass exactly
+	these to read to show their details.
+	"""
+	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*", "as": "count"}])
+	# Real IDs up front: small models otherwise invent plausible-looking record names.
+	names = frappe.get_list(
+		doctype, filters=filters, pluck="name", order_by="creation desc", limit=COUNT_NAMES_LIMIT
+	)
+	return {"doctype": doctype, "count": int(rows[0]["count"]) if rows else 0, "names": names}
 
 
 KNOWLEDGE_SEARCH_SLUG = "search_knowledge"
@@ -330,8 +635,420 @@ def _apply_action(doctype: str, name: str, action: str, args: dict[str, Any]) ->
 	raise ValueError(f"Unknown action {action!r} for {doctype}")
 
 
+def _precheck_create(args: dict[str, Any], context: str | None = None) -> str | None:
+	# A single object plainly means one record — small models often drop the list brackets.
+	# Normalised in place so the approval card and the call itself both see a list.
+	if isinstance(args.get("records"), dict):
+		args["records"] = [args["records"]]
+	records = args.get("records")
+	if isinstance(records, list):
+		args["records"] = records = [_normalize_values(args.get("doctype"), r) for r in records]
+	if not isinstance(records, list) or not records or not all(isinstance(r, dict) and r for r in records):
+		return (
+			"records must be a non-empty list of field-value objects. describe() the DocType for its "
+			"required fields and ask the user for any values you don't have before calling create."
+		)
+	for row, values in enumerate(records):
+		try:
+			misplaced = _misplaced_child_fields(args.get("doctype") or "", values)
+		except Exception:
+			return None  # unknown doctype etc.: let the tool itself report it
+		if misplaced:
+			return f"Row {row}: {misplaced}"
+	doctype = args.get("doctype")
+	return (
+		_unknown_fields_error(doctype, records)
+		or _missing_required_error(doctype, records)
+		or _ungrounded_error(doctype, records, context)
+		or _resolve_links_error(doctype, records)
+	)
+
+
+def _normalize_values(doctype: str | None, values: Any) -> Any:
+	"""Fix the two ways models most often mis-key a record: field labels instead of fieldnames
+	("Date of Birth" -> date_of_birth) and dates as the user typed them in the site's format
+	("01-06-2003" on a dd-mm-yyyy site -> 2003-06-01; Frappe itself would read it month-first).
+	Child-table rows are normalised against their own DocType."""
+	if not isinstance(values, dict) or not doctype or not frappe.db.exists("DocType", doctype):
+		return values
+	meta = frappe.get_meta(doctype)
+	# Data fields only: a Section Break can share a label with its table ("Items").
+	by_label = {
+		(f.label or "").strip().lower(): f.fieldname
+		for f in meta.fields
+		if f.label and f.fieldtype not in LAYOUT_FIELDTYPES
+	}
+	out: dict[str, Any] = {}
+	for key, value in values.items():
+		fieldname = key if meta.has_field(key) else by_label.get(str(key).strip().lower(), key)
+		if not meta.has_field(fieldname):
+			# An unknown key whose value fits exactly one unused field ("user_name": an email,
+			# on User whose only email field is `email`) is that field.
+			fits = [
+				f.fieldname
+				for f in meta.fields
+				if _value_fits(f, value) and f.fieldname not in values and f.fieldname not in out
+			]
+			if len(fits) == 1:
+				fieldname = fits[0]
+		field = meta.get_field(fieldname)
+		if field and field.fieldtype in ("Table", "Table MultiSelect") and isinstance(value, list):
+			value = [_normalize_values(field.options, row) for row in value]
+		elif field and field.fieldtype == "Date" and isinstance(value, str):
+			value = _to_iso_date(value)
+		elif field and field.fieldtype in NUMERIC_FIELDTYPES and isinstance(value, str):
+			value = _to_number(value, int if field.fieldtype == "Int" else float)
+		out[fieldname] = value
+	return out
+
+
+NUMERIC_FIELDTYPES = frozenset({"Int", "Float", "Currency", "Percent"})
+
+
+def _to_number(value: str, kind: type) -> Any:
+	"""A number typed as text ("100", "1,500.50") as a number — ERPNext's amount maths fails on
+	strings (abs() of a str). Anything that isn't a number is returned for Frappe to reject."""
+	try:
+		return kind(float(value.replace(",", "").strip()))
+	except ValueError:
+		return value
+
+
+SITE_DATE_DIRECTIVES = {"dd": "%d", "mm": "%m", "yyyy": "%Y"}
+
+
+def _to_iso_date(value: str) -> str:
+	"""A date typed in the site's format (any of - / . as separator) as YYYY-MM-DD; other
+	values are returned unchanged for Frappe to validate."""
+	from datetime import datetime
+
+	text = value.strip()
+	if DATE_PATTERN.match(text):
+		return text
+	site_format = (frappe.db.get_single_value("System Settings", "date_format") or "").lower()
+	parts = re.split(r"[-/.]", site_format)
+	if sorted(parts) != sorted(SITE_DATE_DIRECTIVES):
+		return value
+	for sep in ("-", "/", "."):
+		try:
+			pattern = sep.join(SITE_DATE_DIRECTIVES[p] for p in parts)
+			return datetime.strptime(text, pattern).date().isoformat()
+		except ValueError:
+			continue
+	return value
+
+
+def _unknown_fields_error(doctype: str | None, records: list[dict[str, Any]]) -> str | None:
+	"""Name keys that are not fields (after label mapping). Frappe would drop them silently —
+	a `quantity` meant for `qty` just vanishes from the saved record."""
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return None
+	problems = []
+	for record in records:
+		problems += _unknown_in(doctype, record)
+	if not problems:
+		return None
+	return "Unknown fields: " + "; ".join(problems) + ". Use the fieldnames from describe, then call again."
+
+
+def _unknown_in(doctype: str, values: dict[str, Any]) -> list[str]:
+	import difflib
+
+	meta = frappe.get_meta(doctype)
+	problems = []
+	for key, value in values.items():
+		if key in _STANDARD_KEYS:
+			continue
+		field = meta.get_field(key)
+		if field is None:
+			names = [f.fieldname for f in meta.fields if f.fieldtype not in LAYOUT_FIELDTYPES]
+			# Fields that fit the value come first: an email address under "user_name" is meant
+			# for User's Email, not Username.
+			fits = [f.fieldname for f in meta.fields if _value_fits(f, value)]
+			close = difflib.get_close_matches(str(key).lower(), names, n=3, cutoff=0.5)
+			close = list(dict.fromkeys(fits[:2] + close))[:3]
+			hint = f" (did you mean {', '.join(close)}?)" if close else ""
+			problems.append(f"{key!r} is not a field of {doctype}{hint}")
+		elif field.fieldtype in ("Table", "Table MultiSelect") and isinstance(value, list):
+			for row in value:
+				if isinstance(row, dict):
+					problems += _unknown_in(field.options, row)
+	return problems
+
+
+EMAIL_VALUE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PHONE_VALUE = re.compile(r"^\+?[\d\s()-]{7,}$")
+
+
+def _value_fits(field: Any, value: Any) -> bool:
+	"""Whether a value's shape plainly matches a field's type (email, phone, date)."""
+	if not isinstance(value, str) or field.fieldtype in LAYOUT_FIELDTYPES:
+		return False
+	text = value.strip()
+	if EMAIL_VALUE.match(text):
+		return field.fieldtype == "Data" and (field.options == "Email" or "email" in field.fieldname)
+	if PHONE_VALUE.match(text):
+		return field.fieldtype == "Data" and (
+			field.options == "Phone" or field.fieldname in ("phone", "mobile_no", "cell_number")
+		)
+	if DATE_PATTERN.match(text):
+		return field.fieldtype == "Date"
+	return False
+
+
+def _resolve_links_error(doctype: str | None, records: list[dict[str, Any]]) -> str | None:
+	"""Swap a Link value that is a record's display name for its ID ("Test Annual Maintenance
+	Contract" -> TEST-AMC-SVC), in place. Errors when no record, or more than one, matches."""
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return None
+	problems = []
+	for record in records:
+		problems += _resolve_links_in(doctype, record)
+	if not problems:
+		return None
+	return "; ".join(problems) + ". Look the record up with read or ask the user, then call again."
+
+
+def _resolve_links_in(doctype: str, values: dict[str, Any]) -> list[str]:
+	meta = frappe.get_meta(doctype)
+	problems = []
+	for key, value in list(values.items()):
+		field = meta.get_field(key)
+		if field is None:
+			continue
+		if field.fieldtype in ("Table", "Table MultiSelect") and isinstance(value, list):
+			for row in value:
+				if isinstance(row, dict):
+					problems += _resolve_links_in(field.options, row)
+			continue
+		if not isinstance(value, str) or not value:
+			continue
+		if field.fieldtype == "Link":
+			target = field.options
+		elif field.fieldtype == "Dynamic Link":
+			target = values.get(field.options)  # the DocType chosen in the companion field
+		else:
+			continue
+		if not target or target == "DocType" or not frappe.db.exists("DocType", target):
+			continue
+		if frappe.db.exists(target, {"name": value}):
+			continue
+		matches = _records_titled(target, value)
+		if len(matches) == 1:
+			values[key] = matches[0]
+		elif matches:
+			problems.append(f"{field.label} {value!r} matches several {target} records: {', '.join(matches)}")
+		else:
+			problems.append(f"No {target} with ID or name {value!r} (field {field.label})")
+	return problems
+
+
+def _records_titled(doctype: str, title: str) -> list[str]:
+	"""IDs of the records whose display name equals `title` (case-insensitive)."""
+	meta = frappe.get_meta(doctype)
+	candidates = [meta.title_field, f"{frappe.scrub(doctype)}_name", "title", "full_name"]
+	for fieldname in dict.fromkeys(c for c in candidates if c and meta.has_field(c)):
+		names = frappe.get_list(doctype, filters={fieldname: title}, pluck="name", limit=5)
+		if names:
+			return names
+	return []
+
+
+def _missing_required_error(doctype: str | None, records: list[dict[str, Any]]) -> str | None:
+	"""Name the required fields a record lacks, so the model asks the user for them instead of
+	putting an incomplete record in front of them for approval (and failing on save)."""
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return None
+	meta = frappe.get_meta(doctype)
+	_defaults, sole_links = _field_facts(doctype)
+	required = [f for f in _user_filled(meta) if f.fieldname not in sole_links]
+	for row, values in enumerate(records):
+		for fieldname, only in sole_links.items():
+			if meta.has_field(fieldname) and not values.get(fieldname):
+				values[fieldname] = only
+		missing = [f.label or f.fieldname for f in required if values.get(f.fieldname) in (None, "")]
+		if missing:
+			return (
+				f"Row {row} is missing required fields: {', '.join(missing)}. Ask the user for these "
+				"values (all of them in one message), then call create again."
+			)
+	return None
+
+
+def _precheck_update(args: dict[str, Any], context: str | None = None) -> str | None:
+	if not args.get("values"):
+		return "values must be a non-empty object of the fields to change."
+	if isinstance(args["values"], dict):
+		args["values"] = _normalize_values(args.get("doctype"), args["values"])
+	doctype, values = args.get("doctype"), [args["values"]]
+	return (
+		_precheck_names(args)
+		or _unknown_fields_error(doctype, values)
+		or _ungrounded_error(doctype, values, context)
+		or _resolve_links_error(doctype, values)
+	)
+
+
+def _update_to_create(args: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+	"""An update whose records all don't exist, carrying values, is a request to make a new
+	record ("create a user ..." sent as update of User 'HR-00003'): run it as a create, which
+	applies its own checks and asks the user to approve."""
+	doctype, names, values = args.get("doctype"), args.get("names"), args.get("values")
+	if not (isinstance(values, dict) and values and isinstance(names, list) and names):
+		return None
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return None
+	if any(frappe.db.exists(doctype, {"name": n}) for n in names if isinstance(n, str)):
+		return None
+	return "create", {"doctype": doctype, "records": [dict(values)]}
+
+
+def _precheck_names(args: dict[str, Any], context: str | None = None) -> str | None:
+	names = args.get("names")
+	if not isinstance(names, list) or not names:
+		return (
+			"names must be a non-empty list of existing record IDs (from count or read). "
+			"To make a NEW record, call create instead."
+		)
+	doctype = args.get("doctype") or ""
+	if not frappe.db.exists("DocType", doctype):
+		return None  # let the tool report the unknown DocType
+	missing = [n for n in names if not frappe.db.exists(doctype, {"name": n})]
+	if missing:
+		return (
+			f"No {doctype} record with ID {', '.join(map(repr, missing))}. This tool only works on "
+			"existing records. To make a NEW record, call create(doctype, records=[{...}]) with the "
+			"values the user gave; to find existing IDs, use count or read."
+		)
+	return None
+
+
+def _precheck_run_action(args: dict[str, Any], context: str | None = None) -> str | None:
+	problem = _precheck_names(args, context)
+	if problem:
+		return problem
+	doctype, action = args["doctype"], args.get("action")
+	if not frappe.db.exists("DocType", doctype):
+		return None
+	meta = frappe.get_meta(doctype)
+	doc = frappe.get_doc(doctype, args["names"][0])
+	available = _doc_actions(doc, meta)
+	valid = [
+		a for a in available["lifecycle"] if a in ("submit", "cancel", "amend")
+	] + available["workflow"] + available["methods"]
+	if action not in valid:
+		listed = ", ".join(valid) or "none"
+		return f"{action!r} is not an available action for {doctype} {doc.name}. Available: {listed}."
+	return None
+
+
+def _ungrounded_error(doctype: str | None, records: list[Any], context: str | None) -> str | None:
+	"""Reject values that appear nowhere in what the user said or a tool returned — i.e. that
+	the model made up (a sample "John Smith" employee). A field's own default is allowed.
+	Skipped when `context` is None: the user has already seen and approved the values."""
+	if context is None:
+		return None
+	defaults, sole_links = _field_facts(doctype)
+	invented = sorted(
+		{
+			f"{key}={value}"
+			for record in records
+			for key, value in _leaf_values(record)
+			if not _is_grounded(value, context)
+			and str(value).lower() != defaults.get(key)
+			and value != sole_links.get(key)
+		}
+	)
+	if not invented:
+		return None
+	date_format = frappe.db.get_single_value("System Settings", "date_format") or "yyyy-mm-dd"
+	return (
+		f"These values were not given by the user or found by a tool: {', '.join(invented)}. "
+		"Never make up or guess data — ask the user for these values, then call again. "
+		f"Write dates as YYYY-MM-DD; the user types dates as {date_format}."
+	)
+
+
+def _leaf_values(value: Any, key: str = "") -> list[tuple[str, Any]]:
+	"""(fieldname, scalar) pairs in a record, descending into child-table rows."""
+	if isinstance(value, dict):
+		return [pair for k, v in value.items() for pair in _leaf_values(v, k)]
+	if isinstance(value, list):
+		return [pair for v in value for pair in _leaf_values(v, key)]
+	if value is None or isinstance(value, bool) or key in ("doctype", "name"):
+		return []
+	return [(key, value)]
+
+
+def _is_grounded(value: Any, context: str) -> bool:
+	if isinstance(value, int | float):
+		number = int(value) if float(value).is_integer() else value
+		return _mentions(context, str(number))
+	text = str(value).strip().lower()
+	if not text:
+		return True
+	if _mentions(context, text):
+		return True
+	if DATE_PATTERN.match(text):
+		return any(_mentions(context, form) for form in _date_forms(text[:10]))
+	# Built from what the user typed ("Darshan K." from "darshan" and "k"): every word must appear.
+	words = WORD_PATTERN.findall(text)
+	return bool(words) and all(_mentions(context, w) for w in words if len(w) > 1)
+
+
+def _mentions(context: str, text: str) -> bool:
+	"""`text` occurs in `context` as a whole token, not inside a longer word or number."""
+	return re.search(rf"(?<![\w]){re.escape(text)}(?![\w])", context) is not None
+
+
+def _date_forms(iso: str) -> set[str]:
+	"""Ways a person may have typed an ISO date: ISO itself, the site's format, and common
+	day-first / month-first / written forms ("1 sep 2026"). Day and month must both match —
+	the year alone let a made-up 2026-01-01 pass for "01-09-2026"."""
+	try:
+		date = frappe.utils.getdate(iso)
+	except Exception:
+		return {iso}
+	d, m, y = date.day, date.month, date.year
+	# Numeric dates are read in the site's order only: "01-02-2002" is 1 Feb on a dd-mm-yyyy
+	# site, and must not also vouch for 2 Jan.
+	site_format = (frappe.db.get_single_value("System Settings", "date_format") or "dd-mm-yyyy").lower()
+	first, second = (m, d) if site_format.startswith("mm") else (d, m)
+	forms = {iso}
+	for sep in ("-", "/", "."):
+		forms |= {f"{first:02d}{sep}{second:02d}{sep}{y}", f"{first}{sep}{second}{sep}{y}"}
+	for month in (date.strftime("%b").lower(), date.strftime("%B").lower()):
+		forms |= {f"{d} {month} {y}", f"{d:02d} {month} {y}", f"{month} {d} {y}", f"{month} {d}, {y}"}
+	forms.add(frappe.utils.formatdate(iso, site_format).lower())
+	return forms
+
+
+def _field_facts(doctype: str | None) -> tuple[dict[str, str], dict[str, str]]:
+	"""Values allowed without the user saying them, across the DocType and its child tables:
+	(fieldname -> lower-cased default, fieldname -> the only record a Link field can hold,
+	e.g. the site's single Company)."""
+	if not doctype or not frappe.db.exists("DocType", doctype):
+		return {}, {}
+	meta = frappe.get_meta(doctype)
+	fields = [f for m in [meta, *(frappe.get_meta(t.options) for t in meta.get_table_fields())] for f in m.fields]
+	defaults = {f.fieldname: str(f.default).lower() for f in fields if f.default}
+	sole_links: dict[str, str] = {}
+	for f in fields:
+		if f.fieldtype == "Link" and f.reqd and f.options:
+			names = frappe.get_all(f.options, pluck="name", limit=2)
+			if len(names) == 1:
+				sole_links[f.fieldname] = names[0]
+	return defaults, sole_links
+
+
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# Dots only inside a word, so "john.smith@example.com" stays whole but "K." matches "k".
+WORD_PATTERN = re.compile(r"[\w@+-]+(?:\.[\w@+-]+)*")
+
+
 @tool(
 	requires_confirmation=True,
+	precheck=_precheck_create,
 	confirm_prompt=lambda args: (
 		_("Create {0} {1} record(s):\n\n{2}").format(
 			len(args.get("records") or []),
@@ -340,14 +1057,30 @@ def _apply_action(doctype: str, name: str, action: str, args: dict[str, Any]) ->
 		)
 	),
 )
-def create(doctype: str, records: list[dict[str, Any]]) -> dict[str, Any]:
-	"""Create one or more records. `records` is a list of field-value dicts, each validated and inserted."""
+def create(
+	doctype: DocTypeArg,
+	records: Annotated[
+		list[dict[str, Any]],
+		"One object per record to create, keyed by fieldname. Child-table rows go in a list "
+		'under the table field, e.g. [{"customer": "test", "items": [{"item_code": "TEST-MOUSE-WL", '
+		'"qty": 2, "rate": 650}]}].',
+	],
+) -> dict[str, Any]:
+	"""Create new records. Returns {created: [IDs], failures: [...]}. The user approves first.
+
+	Only when the user asked to create and gave the values. describe the DocType first for its
+	required fields; Link values must be existing record names (use item codes, not item names).
+	"""
 	if not frappe.has_permission(doctype, "create"):
 		raise PermissionError(f"No permission to create {doctype}")
 
 	created: list[str] = []
 	failures: list[dict[str, Any]] = []
 	for row, values in enumerate(records):
+		misplaced = _misplaced_child_fields(doctype, values or {})
+		if misplaced:
+			failures.append({"row": row, "error": misplaced})
+			continue
 		try:
 			doc = frappe.new_doc(doctype)
 			doc.update(values or {})
@@ -356,14 +1089,50 @@ def create(doctype: str, records: list[dict[str, Any]]) -> dict[str, Any]:
 		except Exception as e:
 			failures.append({"row": row, "error": _error_text(e)})
 
-	result: dict[str, Any] = {"doctype": doctype, "created": created}
+	route = doctype.lower().replace(" ", "-")
+	result: dict[str, Any] = {
+		"doctype": doctype,
+		"created": created,
+		"links": [f"/desk/{route}/{name}" for name in created],
+	}
 	if failures:
 		result["failures"] = failures
 	return result
 
 
+def _misplaced_child_fields(doctype: str, values: dict[str, Any]) -> str | None:
+	"""Explain top-level keys that are really fields of one of the doctype's child tables
+	(e.g. `item_code` on a Sales Invoice). Frappe would otherwise drop them silently and fail
+	later with an error that says nothing about the cause (an invoice with no items crashes
+	computing totals), leaving the model nothing to correct."""
+	meta = frappe.get_meta(doctype)
+	unknown = [key for key in values if not meta.has_field(key) and key not in _STANDARD_KEYS]
+	if not unknown:
+		return None
+
+	hints: list[str] = []
+	for table in meta.get_table_fields():
+		child = frappe.get_meta(table.options)
+		owned = [key for key in unknown if child.has_field(key)]
+		if owned:
+			example = ", ".join(f'"{key}": ...' for key in owned)
+			hints.append(
+				f"{', '.join(owned)} belong to the child table `{table.fieldname}` ({table.options}); "
+				f'pass them as "{table.fieldname}": [{{{example}}}]'
+			)
+			unknown = [key for key in unknown if key not in owned]
+	if not hints:
+		return None
+	return f"Fields not on {doctype}: " + "; ".join(hints) + ". Nothing was created for this row."
+
+
+_STANDARD_KEYS = frozenset({"doctype", "name", "__newname"})
+
+
 @tool(
 	requires_confirmation=True,
+	precheck=_precheck_update,
+	redirect=_update_to_create,
 	confirm_prompt=lambda args: (
 		_("Update {0} {1} ({2}):\n\n{3}").format(
 			len(args.get("names") or []),
@@ -373,8 +1142,15 @@ def create(doctype: str, records: list[dict[str, Any]]) -> dict[str, Any]:
 		)
 	),
 )
-def update(doctype: str, names: list[str], values: dict[str, Any]) -> dict[str, Any]:
-	"""Apply the same field values to one or more existing records. Runs full validation per record."""
+def update(
+	doctype: DocTypeArg,
+	names: NamesArg,
+	values: Annotated[
+		dict[str, Any], 'Only the fields to change, by fieldname, e.g. {"status": "Closed"}.'
+	],
+) -> dict[str, Any]:
+	"""Change fields on existing records (the same values on each). Returns {updated, failures}.
+	The user approves first. Submitted records can't be edited — cancel and amend via run_action."""
 	updated: list[str] = []
 	failures: list[dict[str, Any]] = []
 	for name in names:
@@ -396,6 +1172,7 @@ def update(doctype: str, names: list[str], values: dict[str, Any]) -> dict[str, 
 
 @tool(
 	requires_confirmation=True,
+	precheck=_precheck_names,
 	confirm_prompt=lambda args: (
 		_("Delete {0} {1}: {2}").format(
 			len(args.get("names") or []),
@@ -404,8 +1181,9 @@ def update(doctype: str, names: list[str], values: dict[str, Any]) -> dict[str, 
 		)
 	),
 )
-def delete(doctype: str, names: list[str]) -> dict[str, Any]:
-	"""Delete one or more records. Fails per record if another record links to it."""
+def delete(doctype: DocTypeArg, names: NamesArg) -> dict[str, Any]:
+	"""Delete records. Returns {deleted, failures}; a record fails if others link to it or it is
+	submitted (cancel it first). The user approves first."""
 	deleted: list[str] = []
 	failures: list[dict[str, Any]] = []
 	for name in names:
@@ -425,6 +1203,7 @@ def delete(doctype: str, names: list[str]) -> dict[str, Any]:
 
 @tool(
 	requires_confirmation=True,
+	precheck=_precheck_run_action,
 	confirm_prompt=lambda args: (
 		_("Run '{0}' on {1} {2}: {3}").format(
 			args.get("action"),
@@ -435,12 +1214,17 @@ def delete(doctype: str, names: list[str]) -> dict[str, Any]:
 	),
 )
 def run_action(
-	doctype: str,
-	names: list[str],
-	action: str,
-	args: dict[str, Any] | None = None,
+	doctype: DocTypeArg,
+	names: NamesArg,
+	action: Annotated[
+		str,
+		'One of the actions describe(doctype, name) lists, e.g. "submit", "cancel", "amend", '
+		"or a workflow transition. Never invent one.",
+	],
+	args: Annotated[dict[str, Any] | None, "Arguments for a method action; usually omit."] = None,
 ) -> dict[str, Any]:
-	"""Run a document action found via describe: submit, cancel, amend, rename, a workflow transition, or a whitelisted method."""
+	"""Run a document action (submit, cancel, amend, rename, workflow transition, or a
+	whitelisted method) on records. The user approves first."""
 	args = args or {}
 
 	if action == "rename":
@@ -465,10 +1249,15 @@ def run_action(
 	return result
 
 
+from flow.tools.diagnosis import error_diagnosis  # noqa: E402
+
 BUILTIN_TOOLS: list[Tool] = [
 	find_doctypes,
 	describe,
+	creation_steps,
+	error_diagnosis,
 	read,
+	count,
 	search_knowledge,
 	update_memory,
 	create,

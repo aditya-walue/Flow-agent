@@ -228,3 +228,23 @@ class TestSchemaPrimitives(UnitTestCase):
 		self.assertEqual(schema["properties"], {})
 		self.assertNotIn("required", schema)
 		self.assertFalse(schema["additionalProperties"])
+
+
+class TestUnknownArguments(UnitTestCase):
+	def test_unknown_argument_names_the_valid_parameters(self):
+		@tool
+		def read(doctype: str, limit: int = 20) -> str:
+			"""Read records."""
+			return doctype
+
+		with self.assertRaisesRegex(TypeError, r"read has no parameter\(s\) names\. Valid parameters: doctype, limit\."):
+			read(doctype="Sales Invoice", names=["x"])
+
+	def test_var_keyword_tools_accept_extra_arguments(self):
+		@tool
+		def passthrough(doctype: str, **extra) -> dict:
+			"""Pass extras through."""
+			return extra
+
+		self.assertEqual(passthrough(doctype="x", anything=1), {"anything": 1})
+

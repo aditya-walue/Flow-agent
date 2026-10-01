@@ -68,6 +68,9 @@ export const stopRun = (run_name) => frappe.xcall("flow.api.stop_run", { run_nam
 // approval tool call from an inline one.
 export const getAgentTools = (agent) => frappe.xcall("flow.api.get_agent_tools", { agent });
 
+// Deliver a browser-run model's reply (or error) to the run stream waiting on it.
+export const submitBrowserReply = (args) => frappe.xcall("flow.api.submit_browser_reply", args);
+
 // Upload a file as private, returning the created File doc. The chat attachment
 // flow needs the File name to stage it via attachFile.
 export async function uploadFile(file) {

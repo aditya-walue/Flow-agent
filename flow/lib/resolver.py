@@ -53,7 +53,15 @@ def _resolve_module(doc: FlowTool) -> Tool:
 		)
 
 	if isinstance(obj, Tool):
-		return _build_tool(doc, obj.parameters, obj.func, confirm_prompt=obj.confirm_prompt)
+		return _build_tool(
+			doc,
+			obj.parameters,
+			obj.func,
+			confirm_prompt=obj.confirm_prompt,
+			precheck=obj.precheck,
+			final_answer=obj.final_answer,
+			redirect=obj.redirect,
+		)
 	if callable(obj):
 		return _build_tool(doc, build_schema(obj), obj)
 	frappe.throw(
@@ -67,7 +75,16 @@ def _resolve_script(doc: FlowTool, *, restrict_commit_rollback: bool = False) ->
 	return _build_tool(doc, schema_from_code(doc.code), runner)
 
 
-def _build_tool(doc: FlowTool, parameters: dict[str, Any], func: Any, *, confirm_prompt: Any = None) -> Tool:
+def _build_tool(
+	doc: FlowTool,
+	parameters: dict[str, Any],
+	func: Any,
+	*,
+	confirm_prompt: Any = None,
+	precheck: Any = None,
+	final_answer: bool = False,
+	redirect: Any = None,
+) -> Tool:
 	return Tool(
 		name=doc.slug,
 		description=doc.description,
@@ -75,6 +92,9 @@ def _build_tool(doc: FlowTool, parameters: dict[str, Any], func: Any, *, confirm
 		func=func,
 		requires_confirmation=bool(doc.requires_confirmation),
 		confirm_prompt=confirm_prompt,
+		precheck=precheck,
+		final_answer=final_answer,
+		redirect=redirect,
 	)
 
 

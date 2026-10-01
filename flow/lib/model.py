@@ -87,10 +87,19 @@ class Model:
 	) -> ChatResponse | Generator[str, None, ChatResponse]:
 		"""Call the model. When `stream=True`, returns a generator that yields text deltas
 		and returns the assembled `ChatResponse` via PEP 380 (`StopIteration.value`)."""
-		import litellm
-
 		if isinstance(messages, str):
 			messages = [{"role": "user", "content": messages}]
+
+		from flow.lib.webllm import chat_stream, is_browser_model
+
+		if is_browser_model(self.model_id):
+			if not stream:
+				raise ValueError(
+					f"{self.model_id!r} runs in the user's browser, so it can only be used from the chat panel."
+				)
+			return chat_stream(self.model_id, messages, tools, self.params)
+
+		import litellm
 
 		kwargs: dict[str, Any] = {
 			"model": self.model_id,

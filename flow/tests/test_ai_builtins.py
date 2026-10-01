@@ -1,12 +1,17 @@
 # Copyright (c) 2026, Frappe Technologies and contributors
 # License: MIT. See LICENSE
 
+import json
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
 from flow.tools.builtins import (
 	BUILTIN_TOOLS,
+	count,
 	create,
+	creation_steps,
+	run_action,
 	delete,
 	describe,
 	execute,
@@ -43,6 +48,12 @@ class TestFindDoctypes(IntegrationTestCase):
 			self.assertNotIn("User", names)
 		finally:
 			frappe.set_user("Administrator")
+
+
+class TestFindDoctypesWrongModule(IntegrationTestCase):
+	def test_wrong_module_falls_back_to_name_search(self):
+		names = {r["name"] for r in find_doctypes(search="ToDo", module="Accounts")}
+		self.assertIn("ToDo", names)
 
 
 class TestDescribe(IntegrationTestCase):
@@ -88,6 +99,38 @@ class TestRead(IntegrationTestCase):
 		frappe.get_doc({"doctype": "ToDo", "description": "fields probe"}).insert()
 		rows = read(doctype="ToDo", filters={"description": "fields probe"}, fields=["name", "description"])
 		self.assertEqual(rows[0]["description"], "fields probe")
+
+
+class TestCount(IntegrationTestCase):
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+
+	def test_counts_matching_records(self):
+		for _ in range(3):
+			frappe.get_doc({"doctype": "ToDo", "description": "ai builtin count probe"}).insert()
+
+		result = count(doctype="ToDo", filters={"description": "ai builtin count probe"})
+
+		self.assertEqual(result["count"], 3)
+		self.assertEqual(len(result["names"]), 3)
+		self.assertTrue(all(frappe.db.exists("ToDo", n) for n in result["names"]))
+
+	def test_permission_denied_raises(self):
+		frappe.set_user("Guest")
+		with self.assertRaises(frappe.PermissionError):
+			count(doctype="User")
+
+
+class TestDescribeRecordName(IntegrationTestCase):
+	def test_reports_submittable_and_workflow(self):
+		result = describe(doctype="ToDo")
+		self.assertFalse(result["submittable"])
+		self.assertIsNone(result["workflow"])
+
+	def test_doctype_name_as_record_name_explains_the_fix(self):
+		with self.assertRaisesRegex(ValueError, r'read\(doctype="ToDo", fields=\["name"\]\)'):
+			describe(doctype="ToDo", name="ToDo")
 
 
 class TestExecute(IntegrationTestCase):
@@ -143,6 +186,16 @@ class TestCreate(IntegrationTestCase):
 		self.assertEqual(result["created"], [])
 		self.assertEqual(len(result["failures"]), 1)
 		self.assertEqual(result["failures"][0]["row"], 0)
+
+	def test_child_table_fields_at_top_level_are_explained(self):
+		# `user` is a field of Note's `seen_by` child table (Note Seen By), not of Note itself.
+		result = create(doctype="Note", records=[{"title": "misplaced child probe", "user": "Administrator"}])
+
+		self.assertEqual(result["created"], [])
+		error = result["failures"][0]["error"]
+		self.assertIn("`seen_by`", error)
+		self.assertIn('"seen_by": [{"user": ...}]', error)
+		self.assertFalse(frappe.db.exists("Note", {"title": "misplaced child probe"}))
 
 
 class TestUpdate(IntegrationTestCase):
@@ -235,3 +288,306 @@ class TestSyncBuiltinTools(IntegrationTestCase):
 		sync_builtin_tools()
 		count = frappe.db.count("Flow Tool", {"slug": "read"})
 		self.assertEqual(count, 1)
+
+
+class TestWritePrecheck(IntegrationTestCase):
+	"""Unusable write arguments go back to the model instead of becoming an approval card."""
+
+	def _invoke(self, tool, arguments):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[tool])
+		return agent._invoke(ToolCall(id="c1", name=tool.name, arguments=arguments))
+
+	def test_empty_create_is_rejected_before_confirmation(self):
+		result = self._invoke(create, {"doctype": "ToDo", "records": [{}]})
+		self.assertIn("non-empty list", json.loads(result)["error"])
+
+	def test_misplaced_child_fields_are_rejected_before_confirmation(self):
+		result = self._invoke(create, {"doctype": "Note", "records": [{"title": "x", "user": "Administrator"}]})
+		self.assertIn("`seen_by`", json.loads(result)["error"])
+
+	def test_empty_names_are_rejected_before_confirmation(self):
+		result = self._invoke(delete, {"doctype": "ToDo", "names": []})
+		self.assertIn("names must be", json.loads(result)["error"])
+
+	def test_single_record_object_is_wrapped_in_a_list(self):
+		from flow.lib.agent import Question
+
+		arguments = {"doctype": "ToDo", "records": {"description": "x"}}
+		result = self._invoke(create, arguments)
+		self.assertIsInstance(result, Question)
+		self.assertEqual(arguments["records"], [{"description": "x"}])
+
+	def test_valid_create_still_asks_for_approval(self):
+		from flow.lib.agent import Question
+
+		result = self._invoke(create, {"doctype": "ToDo", "records": [{"description": "x"}]})
+		self.assertIsInstance(result, Question)
+
+	def test_approved_resume_wraps_single_record_object(self):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create])
+		call = ToolCall(id="c1", name="create", arguments={"doctype": "ToDo", "records": {"description": "resume wrap probe"}})
+		result = json.loads(agent._resolve_confirmation(call, "Approve"))
+		self.assertEqual(len(result["created"]), 1)
+		frappe.db.rollback()
+
+
+class TestCreationSteps(IntegrationTestCase):
+	def test_answer_lists_route_required_fields_and_save(self):
+		answer = creation_steps(doctype="ToDo")["answer"]
+		self.assertIn("[New ToDo](/desk/todo/new)", answer)
+		self.assertIn("- **Description**", answer)
+		self.assertIn("**Save**", answer)
+
+	def test_submittable_doctype_lists_items_and_submit(self):
+		if not frappe.db.exists("DocType", "Sales Invoice"):
+			self.skipTest("ERPNext not installed")
+		answer = creation_steps(doctype="Sales Invoice")["answer"]
+		self.assertIn("**Items** table", answer)
+		self.assertIn("**Quantity**", answer)
+		self.assertIn("**Submit**", answer)
+		self.assertNotIn("Debit To", answer)  # defaults from the Company
+
+	def test_permission_denied_raises(self):
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaises(PermissionError):
+				creation_steps(doctype="User")
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_agent_shows_the_answer_without_another_model_call(self):
+		from unittest.mock import MagicMock
+
+		from flow.lib.agent import Agent
+		from flow.lib.model import ChatResponse, ToolCall
+
+		model = MagicMock()
+		model.chat.return_value = ChatResponse(
+			content=None, tool_calls=[ToolCall(id="c1", name="creation_steps", arguments={"doctype": "ToDo"})]
+		)
+		result = Agent(model=model, tools=[creation_steps]).run("how do I add a todo?")
+
+		self.assertEqual(model.chat.call_count, 1)
+		self.assertEqual(result.output, creation_steps(doctype="ToDo")["answer"])
+		self.assertEqual(result.messages[-1], {"role": "assistant", "content": result.output})
+
+
+class TestMadeUpValues(IntegrationTestCase):
+	"""create/update values must come from the user or a tool result, not the model."""
+
+	def _invoke(self, tool, arguments, said):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[tool])
+		messages = [{"role": "user", "content": said}]
+		return agent._invoke(ToolCall(id="c1", name=tool.name, arguments=arguments), messages)
+
+	def test_invented_values_are_rejected(self):
+		result = self._invoke(
+			create,
+			{"doctype": "ToDo", "records": [{"description": "John Smith onboarding", "date": "1985-04-23"}]},
+			"create new todo",
+		)
+		error = json.loads(result)["error"]
+		self.assertIn("description=John Smith onboarding", error)
+		self.assertIn("date=1985-04-23", error)
+
+	def test_values_the_user_gave_pass(self):
+		from flow.lib.agent import Question
+
+		result = self._invoke(
+			create,
+			{"doctype": "ToDo", "records": [{"description": "Call Darshan K.", "date": "2026-10-05", "priority": "Medium"}]},
+			"create a todo: call darshan k on 5 Oct 2026",  # priority Medium is ToDo's default
+		)
+		self.assertIsInstance(result, Question)
+
+	def test_update_values_are_checked(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "update grounding probe"}).insert()
+		result = self._invoke(update, {"doctype": "ToDo", "names": [todo.name], "values": {"status": "Cancelled"}}, "close it")
+		self.assertIn("status=Cancelled", json.loads(result)["error"])
+		frappe.db.rollback()
+
+	def test_date_with_only_the_right_year_is_rejected(self):
+		result = self._invoke(
+			create,
+			{"doctype": "ToDo", "records": [{"description": "call darshan", "date": "2026-01-01"}]},
+			"todo: call darshan on 01-09-2026",
+		)
+		self.assertIn("date=2026-01-01", json.loads(result)["error"])
+
+	def test_date_typed_day_first_matches(self):
+		from flow.lib.agent import Question
+
+		result = self._invoke(
+			create,
+			{"doctype": "ToDo", "records": [{"description": "call darshan", "date": "2026-09-01"}]},
+			"todo: call darshan on 01-09-2026",
+		)
+		self.assertIsInstance(result, Question)
+
+	def test_options_listed_by_metadata_tools_do_not_count(self):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create])
+		messages = [
+			{"role": "user", "content": "create todo call darshan"},
+			{"role": "assistant", "content": None, "tool_calls": [
+				{"id": "s1", "type": "function", "function": {"name": "creation_steps", "arguments": "{}"}}
+			]},
+			{"role": "tool", "tool_call_id": "s1", "content": "Priority (High / Medium / Low)"},
+		]
+		call = ToolCall(id="c1", name="create", arguments={"doctype": "ToDo", "records": [{"description": "call darshan", "priority": "High"}]})
+		self.assertIn("priority=High", json.loads(agent._invoke(call, messages))["error"])
+
+
+class TestRunActionPrecheck(IntegrationTestCase):
+	def _invoke(self, arguments):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[run_action])
+		return agent._invoke(ToolCall(id="c1", name="run_action", arguments=arguments), [])
+
+	def test_missing_record_points_to_create(self):
+		error = json.loads(self._invoke({"doctype": "ToDo", "names": ["Aditya"], "action": "submit"}))["error"]
+		self.assertIn("No ToDo record with ID 'Aditya'", error)
+		self.assertIn("call create", error)
+
+	def test_unavailable_action_lists_the_valid_ones(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "run action probe"}).insert()
+		error = json.loads(self._invoke({"doctype": "ToDo", "names": [todo.name], "action": "submit"}))["error"]
+		self.assertIn("'submit' is not an available action", error)
+		frappe.db.rollback()
+
+
+class TestMissingRequired(IntegrationTestCase):
+	def test_missing_required_fields_are_named_before_approval(self):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create])
+		call = ToolCall(id="c1", name="create", arguments={"doctype": "ToDo", "records": [{"status": "Open"}]})
+		error = json.loads(agent._invoke(call, [{"role": "user", "content": "add a todo"}]))["error"]
+		self.assertIn("missing required fields: Description", error)
+
+
+class TestNormalizeValues(IntegrationTestCase):
+	def test_labels_become_fieldnames(self):
+		from flow.tools.builtins import _normalize_values
+
+		self.assertEqual(
+			_normalize_values("ToDo", {"Description": "x", "Allocated To": "Administrator"}),
+			{"description": "x", "allocated_to": "Administrator"},
+		)
+
+	def test_numbers_typed_as_text_become_numbers(self):
+		from flow.tools.builtins import _normalize_values
+
+		self.assertEqual(
+			_normalize_values("ToDo", {"description": "x", "Description": "y"})["description"], "y"
+		)
+		if frappe.db.exists("DocType", "Item"):
+			values = _normalize_values("Item", {"Opening Stock": "1,500", "Standard Selling Rate": "99.5"})
+			self.assertEqual(values["opening_stock"], 1500.0)
+			self.assertEqual(values["standard_rate"], 99.5)
+
+	def test_site_format_dates_become_iso(self):
+		from flow.tools.builtins import _to_iso_date
+
+		site_format = frappe.db.get_single_value("System Settings", "date_format")
+		frappe.db.set_single_value("System Settings", "date_format", "dd-mm-yyyy")
+		try:
+			self.assertEqual(_to_iso_date("01-06-2003"), "2003-06-01")
+			self.assertEqual(_to_iso_date("01/06/2003"), "2003-06-01")
+			self.assertEqual(_to_iso_date("2003-06-01"), "2003-06-01")
+			self.assertEqual(_to_iso_date("next friday"), "next friday")
+		finally:
+			frappe.db.set_single_value("System Settings", "date_format", site_format)
+
+
+class TestGeneralCreateChecks(IntegrationTestCase):
+	def _invoke(self, arguments, said):
+		from flow.lib.agent import Agent
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create])
+		return agent._invoke(ToolCall(id="c1", name="create", arguments=arguments), [{"role": "user", "content": said}])
+
+	def test_value_inside_a_longer_typo_is_not_grounded(self):
+		result = self._invoke(
+			{"doctype": "ToDo", "records": [{"description": "call darshan", "date": "2002-06-01"}]},
+			"todo: call darshan on 01-06-20023",
+		)
+		self.assertIn("date=2002-06-01", json.loads(result)["error"])
+
+	def test_unknown_field_is_named_with_suggestion(self):
+		result = self._invoke({"doctype": "ToDo", "records": [{"description": "x", "priorty": "High"}]}, "todo x priority high")
+		error = json.loads(result)["error"]
+		self.assertIn("'priorty' is not a field of ToDo", error)
+		self.assertIn("did you mean priority", error)
+
+	def test_link_by_display_name_resolves_to_id(self):
+		from flow.lib.agent import Question
+
+		user = frappe.get_doc("User", "Administrator")
+		arguments = {"doctype": "ToDo", "records": [{"description": "x", "allocated_to": user.full_name}]}
+		result = self._invoke(arguments, f"todo x for {user.full_name}")
+		self.assertIsInstance(result, Question)
+		self.assertEqual(arguments["records"][0]["allocated_to"], "Administrator")
+
+	def test_unknown_link_value_is_reported(self):
+		result = self._invoke(
+			{"doctype": "ToDo", "records": [{"description": "x", "allocated_to": "Nobody Atall"}]},
+			"todo x for nobody atall",
+		)
+		self.assertIn("No User with ID or name 'Nobody Atall'", json.loads(result)["error"])
+
+
+class TestUpdateRedirect(IntegrationTestCase):
+	def test_update_of_missing_records_becomes_a_create(self):
+		from flow.lib.agent import Agent, Question
+		from flow.lib.model import Model, ToolCall
+
+		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create, update])
+		call = ToolCall(id="c1", name="update", arguments={"doctype": "ToDo", "names": ["HR-00003"], "values": {"description": "call aditya"}})
+		messages = [
+			{"role": "user", "content": "todo: call aditya"},
+			{"role": "assistant", "content": None, "tool_calls": [
+				{"id": "c1", "type": "function", "function": {"name": "update", "arguments": "{}"}}
+			]},
+		]
+		result = agent._invoke(call, messages)
+
+		self.assertIsInstance(result, Question)
+		self.assertEqual(call.name, "create")
+		self.assertEqual(call.arguments["records"], [{"description": "call aditya"}])
+		self.assertEqual(messages[1]["tool_calls"][0]["function"]["name"], "create")
+
+	def test_update_of_existing_record_is_left_alone(self):
+		from flow.tools.builtins import _update_to_create
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "redirect probe"}).insert()
+		self.assertIsNone(_update_to_create({"doctype": "ToDo", "names": [todo.name], "values": {"status": "Closed"}}))
+		frappe.db.rollback()
+
+	def test_unknown_key_with_email_value_suggests_email_field(self):
+		from flow.tools.builtins import _unknown_fields_error
+
+		error = _unknown_fields_error("User", [{"user_name": "someone@example.com", "first_name": "A"}])
+		self.assertIn("did you mean email", error)
+
+	def test_unknown_key_whose_value_fits_one_field_is_mapped(self):
+		from flow.tools.builtins import _normalize_values
+
+		values = _normalize_values("User", {"user_name": "someone@example.com", "first_name": "A"})
+		self.assertEqual(values, {"email": "someone@example.com", "first_name": "A"})
+

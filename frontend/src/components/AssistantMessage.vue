@@ -76,7 +76,7 @@ const hovered = ref(false);
 			/>
 		</template>
 
-		<WorkingIndicator v-if="showWorking" />
+		<WorkingIndicator v-if="showWorking" :label="message.status" />
 		<FeedbackBar v-if="showFeedback" :message="message" :hovered="hovered" />
 	</div>
 </template>

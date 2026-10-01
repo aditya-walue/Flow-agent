@@ -16,3 +16,23 @@ export function writePanelState(state) {
 		// storage unavailable — persistence is best-effort
 	}
 }
+
+// The agent the user last picked, kept apart from the panel state above (which main.js
+// rewrites whole) so new chats start on it instead of always on the default "Flow".
+const AGENT_KEY = "flow-panel-agent";
+
+export function readLastAgent() {
+	try {
+		return localStorage.getItem(AGENT_KEY);
+	} catch {
+		return null;
+	}
+}
+
+export function writeLastAgent(name) {
+	try {
+		localStorage.setItem(AGENT_KEY, name);
+	} catch {
+		// best-effort
+	}
+}

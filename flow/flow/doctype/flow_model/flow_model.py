@@ -106,9 +106,19 @@ class FlowModel(Document):
 	def _resolve_context_window(self):
 		# Always derived from the model — never user input. Keeps the last detected value when
 		# litellm can't resolve the model, and 0 otherwise (callers fall back to a default).
-		self.context_window = _detect_context_window(self.model_id) or self.context_window or 0
+		from flow.lib.webllm import browser_context_window, is_browser_model
+
+		if is_browser_model(self.model_id):
+			self.context_window = browser_context_window(json.loads(self.params) if self.params else {})
+			return
+		self.context_window =_detect_context_window(self.model_id) or self.context_window or 0
 
 	def _validate_provider_known(self):
+		from flow.lib.webllm import is_browser_model
+
+		# Browser models (webllm/<model>) run in the chat panel; litellm doesn't know them.
+		if is_browser_model(self.model_id):
+			return
 		try:
 			import litellm
 		except ImportError:
@@ -121,6 +131,16 @@ class FlowModel(Document):
 	@frappe.whitelist()
 	def test_connection(self):
 		self.check_permission("write")
+
+		from flow.lib.webllm import is_browser_model
+
+		if is_browser_model(self.model_id):
+			frappe.throw(
+				_(
+					"This model runs in the browser, so the server can't test it. Select it in the Flow panel and send a message; the first message downloads the model."
+				),
+				title=_("Browser Model"),
+			)
 
 		try:
 			import litellm

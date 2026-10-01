@@ -212,6 +212,12 @@ class Agent:
 	def _resolve_confirmation(self, call: ToolCall, answer: Any) -> str:
 		"""Run the tool if approved; deny if rejected; redirect with user feedback otherwise."""
 		if answer == "Approve":
+			# Resumed calls are re-read from the stored transcript, which keeps the model's
+			# original arguments; normalise them again as at confirmation time.
+			tool = self._tools_by_name[call.name]
+			problem = tool.precheck(call.arguments, None) if tool.precheck else None
+			if problem:
+				return json.dumps({"error": problem})
 			result = self._run_tool(call)
 			return _serialize_tool_result(result)
 		if answer == "Deny":
@@ -248,20 +254,33 @@ class Agent:
 				)
 
 			questions: list[Question] = []
+			results: list[tuple[ToolCall, Any]] = []
 			for call in response.tool_calls:
-				result = self._invoke(call)
+				result = self._invoke(call, messages)
 				if isinstance(result, Question):
 					result.key = call.id
 					questions.append(result)
 					continue
 
 				executed_calls.append(call)
+				results.append((call, result))
 				messages.append(
 					{
 						"role": "tool",
 						"tool_call_id": call.id,
 						"content": _serialize_tool_result(result),
 					}
+				)
+
+			answer = None if questions else self._final_answer(results)
+			if answer is not None:
+				messages.append({"role": "assistant", "content": answer})
+				return RunResult(
+					output=answer,
+					messages=messages,
+					tool_calls=executed_calls,
+					iterations=iteration,
+					usage=usage_total,
 				)
 
 			if questions:
@@ -293,8 +312,11 @@ class Agent:
 					item = next(chunks)
 					if isinstance(item, ToolCallBegin):
 						yield ToolStarted(id=item.id, name=item.name, arguments={})
-					else:
+					elif isinstance(item, str):
 						yield TextChunk(text=item)
+					else:
+						# Browser-model hand-off (flow.lib.webllm): relayed to the client as-is.
+						yield item
 			except StopIteration as e:
 				response = e.value
 			_accumulate_usage(usage_total, response.usage)
@@ -313,11 +335,12 @@ class Agent:
 				return
 
 			questions: list[Question] = []
+			results: list[tuple[ToolCall, Any]] = []
 			for call in response.tool_calls:
 				# Re-announce with the full arguments now that they've finished streaming, before the
 				# tool runs — so the UI shows the arguments during execution, not only with the result.
 				yield ToolStarted(id=call.id, name=call.name, arguments=call.arguments)
-				result = self._invoke(call)
+				result = self._invoke(call, messages)
 				if isinstance(result, Question):
 					result.key = call.id
 					questions.append(result)
@@ -325,9 +348,25 @@ class Agent:
 					continue
 
 				executed_calls.append(call)
+				results.append((call, result))
 				serialized = _serialize_tool_result(result)
 				messages.append({"role": "tool", "tool_call_id": call.id, "content": serialized})
 				yield ToolEnded(id=call.id, name=call.name, result=serialized)
+
+			answer = None if questions else self._final_answer(results)
+			if answer is not None:
+				yield TextChunk(text=answer)
+				messages.append({"role": "assistant", "content": answer})
+				yield Done(
+					result=RunResult(
+						output=answer,
+						messages=messages,
+						tool_calls=executed_calls,
+						iterations=iteration,
+						usage=usage_total,
+					)
+				)
+				return
 
 			if questions:
 				yield Done(
@@ -344,6 +383,33 @@ class Agent:
 				return
 
 		raise RuntimeError(f"Agent {self.name!r} exceeded max_iterations ({self.max_iterations})")
+
+	def _redirect(self, call: ToolCall, tool: Tool, messages: list[dict[str, Any]] | None) -> Tool:
+		"""Swap a call the model aimed at the wrong tool for the right one (see Tool.redirect),
+		in the call and in the stored transcript — a resumed approval re-reads the transcript."""
+		target = tool.redirect(call.arguments) if tool.redirect else None
+		if not target or target[0] not in self._tools_by_name:
+			return tool
+		call.name, call.arguments = target
+		for message in reversed(messages or []):
+			for tc in message.get("tool_calls") or []:
+				if tc["id"] == call.id:
+					tc["function"] = {"name": call.name, "arguments": json.dumps(call.arguments)}
+					return self._tools_by_name[call.name]
+		return self._tools_by_name[call.name]
+
+	def _final_answer(self, results: list[tuple[ToolCall, Any]]) -> str | None:
+		"""The reply to show as-is when every tool called this step is a final-answer tool that
+		returned one; None to hand the results back to the model as usual."""
+		if not results:
+			return None
+		answers = []
+		for call, result in results:
+			tool = self._tools_by_name.get(call.name)
+			if not (tool and tool.final_answer and isinstance(result, dict) and result.get("answer")):
+				return None
+			answers.append(result["answer"])
+		return "\n\n".join(answers)
 
 	def _pending_calls(self, messages: list[dict[str, Any]]) -> list[ToolCall]:
 		"""Tool calls in the transcript that have no tool result yet (awaiting an answer)."""
@@ -379,14 +445,20 @@ class Agent:
 		_validate_messages(input)
 		return list(input)
 
-	def _invoke(self, call: ToolCall) -> Any:
+	def _invoke(self, call: ToolCall, messages: list[dict[str, Any]] | None = None) -> Any:
 		"""Run a tool and return its raw result. A Question (returned or synthesized for
-		`requires_confirmation` tools) signals a pause."""
+		`requires_confirmation` tools) signals a pause. `messages` is the transcript so far,
+		for prechecks that verify argument values came from the user or a tool result."""
 		if call.error:
 			return json.dumps({"error": call.error})
 		tool = self._tools_by_name.get(call.name)
 		if tool is None:
 			return json.dumps({"error": f"Unknown tool: {call.name!r}"})
+		tool = self._redirect(call, tool, messages)
+		context = _grounding_text(messages) if messages is not None else None
+		problem = tool.precheck(call.arguments, context) if tool.precheck else None
+		if problem:
+			return json.dumps({"error": problem})
 		if tool.requires_confirmation and not self.auto_approve:
 			return _confirmation_question(call, tool)
 		return self._run_tool(call)
@@ -398,6 +470,28 @@ class Agent:
 			return tool(**call.arguments)
 		except Exception as e:
 			return json.dumps({"error": str(e)[:ERROR_MESSAGE_LIMIT]})
+
+
+# Tools that return schema and help text, not data: an option they list ("Gender: Male / Female
+# / ...") is not a value the user chose.
+METADATA_TOOLS = frozenset({"find_doctypes", "describe", "creation_steps"})
+
+
+def _grounding_text(messages: list[dict[str, Any]]) -> str:
+	"""Lower-cased text of what the user said and what data tools returned — the only
+	legitimate sources for values the model writes into records."""
+	tool_names = {
+		tc["id"]: tc["function"]["name"]
+		for m in messages
+		if m.get("role") == "assistant"
+		for tc in m.get("tool_calls") or []
+	}
+	return "\n".join(
+		str(m.get("content") or "")
+		for m in messages
+		if m.get("role") == "user"
+		or (m.get("role") == "tool" and tool_names.get(m.get("tool_call_id")) not in METADATA_TOOLS)
+	).lower()
 
 
 def _validate_messages(messages: Any) -> None:

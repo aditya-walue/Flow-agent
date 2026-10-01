@@ -163,6 +163,35 @@ def get_agent_tools(agent: str) -> dict[str, bool]:
 	return {row.slug: bool(row.requires_confirmation) for row in rows}
 
 
+@frappe.whitelist(methods=["POST"])
+def submit_browser_reply(
+	request_id: str,
+	content: str | None = None,
+	error: str | None = None,
+	usage: dict[str, Any] | str | None = None,
+) -> dict[str, bool]:
+	"""Deliver a browser-run model's reply (or failure) to the run stream waiting on it.
+	See flow.lib.webllm."""
+	from flow.lib.webllm import submit_reply
+
+	if not isinstance(request_id, str) or not request_id.strip():
+		frappe.throw(_("Request is required."), title=_("Invalid Request"))
+	if isinstance(usage, str):
+		try:
+			usage = json.loads(usage)
+		except ValueError:
+			usage = None
+	submit_reply(
+		request_id.strip(),
+		{
+			"content": content if isinstance(content, str) else None,
+			"error": error if isinstance(error, str) and error else None,
+			"usage": usage if isinstance(usage, dict) else {},
+		},
+	)
+	return {"ok": True}
+
+
 @frappe.whitelist()
 def attach_file(file: str) -> dict[str, Any]:
 	"""Validate and extract an uploaded File for use as a chat attachment. Errors
@@ -198,7 +227,12 @@ def _format_sse(event: Event) -> bytes:
 def _event_to_dict(event: Event) -> dict[str, Any]:
 	from flow.flow.doctype.flow_run.flow_run import Error, RunStarted
 	from flow.lib.agent import Done, TextChunk, ToolEnded, ToolStarted
+	from flow.lib.webllm import BrowserRequest, Heartbeat
 
+	if isinstance(event, BrowserRequest):
+		return {"type": "llm_request", **asdict(event)}
+	if isinstance(event, Heartbeat):
+		return {"type": "heartbeat"}
 	if isinstance(event, TextChunk):
 		return {"type": "text", "delta": event.text}
 	if isinstance(event, ToolStarted):

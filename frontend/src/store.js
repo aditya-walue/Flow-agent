@@ -1,8 +1,9 @@
 import { ref, computed } from "vue";
 import * as api from "@/api/client";
 import { startRun, resumeRun } from "@/api/stream";
+import { runBrowserRequest } from "@/lib/webllm";
 import { normalizeToolName } from "@/lib/toolMeta";
-import { readPanelState } from "@/lib/panelState";
+import { readLastAgent, readPanelState, writeLastAgent } from "@/lib/panelState";
 import { __ } from "@/lib/translate";
 
 // Module-singleton store: one panel instance, one source of truth. Components
@@ -63,8 +64,9 @@ async function loadInitial() {
 		const [a, m] = await Promise.all([api.loadAgents(), api.loadModels(), refreshHistory()]);
 		agents.value = a;
 		models.value = m;
+		const last = a.find((x) => x.name === readLastAgent());
 		const assistant = a.find((x) => x.name === "Flow");
-		selectedAgent.value = assistant ? assistant.name : a[0]?.name ?? null;
+		selectedAgent.value = (last || assistant || a[0])?.name ?? null;
 		loadToolApproval(selectedAgent.value);
 		loaded.value = true;
 		focusTick.value++;
@@ -122,6 +124,7 @@ function loadToolApproval(agent) {
 function setAgent(name) {
 	if (locked.value) return;
 	selectedAgent.value = name;
+	writeLastAgent(name);
 	loadToolApproval(name);
 }
 function setModel(name) {
@@ -191,6 +194,12 @@ async function switchSession(name) {
 
 	const doc = await api.getSession(name);
 	if (seq !== switchSeq) return;
+	// The chat's agent was disabled since: it can't run another turn, so start fresh
+	// rather than reopen a chat whose every message fails.
+	if (doc.agent && agents.value.length && !agents.value.some((a) => a.name === doc.agent)) {
+		newChat();
+		return;
+	}
 	selectedAgent.value = doc.agent;
 	selectedModel.value = doc.model || null;
 	await loadToolApproval(doc.agent);
@@ -416,7 +425,32 @@ function handleEvent(event, msg) {
 			appendText(msg, `\n\n${__("Error")}: ${event.message}`);
 			msg.pending = false;
 			break;
+		case "llm_request":
+			handleBrowserRequest(event, msg, abortController?.signal);
+			break;
 	}
+}
+
+// A browser model's turn: run it here and post the reply back to the server, whose
+// run stream is paused waiting on it. Failures are posted too, so the run ends with
+// the error instead of waiting out its timeout.
+async function handleBrowserRequest(request, msg, signal) {
+	let reply;
+	try {
+		const result = await runBrowserRequest(request, {
+			onText: (delta) => {
+				appendText(msg, delta);
+				requestScroll();
+			},
+			onStatus: (status) => (msg.status = status),
+			signal,
+		});
+		reply = { content: result.content, usage: result.usage };
+	} catch (e) {
+		msg.status = "";
+		reply = { error: e.name === "AbortError" ? __("Stopped by user.") : e.message || String(e) };
+	}
+	await api.submitBrowserReply({ request_id: request.id, ...reply }).catch(() => {});
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -466,6 +500,8 @@ function pushAssistant(pending = true) {
 		questions: [],
 		runName: null,
 		feedback: null,
+		// Progress line shown in place of "Thinking…" (e.g. a browser model loading).
+		status: "",
 	};
 	messages.value.push(msg);
 	// Return the reactive proxy, not the raw object — streaming mutates this after
@@ -484,6 +520,9 @@ function appendText(msg, delta) {
 function failMessage(msg, error) {
 	appendText(msg, `\n\n${__("Error")}: ${error.message}`);
 	msg.pending = false;
+	// A dropped stream (network error, server restart) can leave the run marked Running on
+	// the server, which blocks the session's next turn; fail it so the user can retry at once.
+	if (sessionName.value) api.recoverSession(sessionName.value).catch(() => {});
 }
 
 function parseToolCalls(raw) {

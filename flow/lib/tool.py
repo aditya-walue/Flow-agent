@@ -30,11 +30,35 @@ class Tool:
 	func: Callable[..., Any]
 	requires_confirmation: bool = False
 	confirm_prompt: Callable[[dict[str, Any]], str] | None = None
+	# Returns an error for arguments that can't work, checked before the user is asked to
+	# approve — so an empty or malformed write is bounced back to the model, not to the user.
+	# May normalise the arguments in place (e.g. wrap a lone object in a list). `context` is
+	# the conversation's user and tool text, for checking values weren't made up; None when
+	# the user has already approved the call.
+	precheck: Callable[[dict[str, Any], str | None], str | None] | None = None
+	# The tool's result carries a finished reply in its "answer" key, shown to the user as-is;
+	# the run ends there instead of asking the model to restate it (small models garble copies).
+	final_answer: bool = False
+	# Re-routes a call the model sent to the wrong tool: returns (tool name, arguments) to run
+	# instead, or None. E.g. an update of records that don't exist is a create.
+	redirect: Callable[[dict[str, Any]], tuple[str, dict[str, Any]] | None] | None = None
 
 	def __post_init__(self) -> None:
 		self._validated = validate_call(config=ConfigDict(arbitrary_types_allowed=True))(self.func)
+		self._accepts_any_kwargs = any(
+			p.kind is inspect.Parameter.VAR_KEYWORD for p in inspect.signature(self.func).parameters.values()
+		)
 
 	def __call__(self, **kwargs: Any) -> Any:
+		# Name the valid parameters: pydantic's "Unexpected keyword argument" leaves a model
+		# that invented an argument nothing to correct with.
+		allowed = self.parameters.get("properties") or {}
+		unknown = sorted(set(kwargs) - set(allowed))
+		if unknown and allowed and not self._accepts_any_kwargs:
+			raise TypeError(
+				f"{self.name} has no parameter(s) {', '.join(unknown)}. "
+				f"Valid parameters: {', '.join(allowed)}."
+			)
 		return self._validated(**kwargs)
 
 	def to_dict(self) -> dict[str, Any]:
@@ -55,6 +79,9 @@ def tool(
 	description: str | None = None,
 	requires_confirmation: bool = False,
 	confirm_prompt: Callable[[dict[str, Any]], str] | None = None,
+	precheck: Callable[[dict[str, Any], str | None], str | None] | None = None,
+	final_answer: bool = False,
+	redirect: Callable[[dict[str, Any]], tuple[str, dict[str, Any]] | None] | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
 	def wrap(f: Callable[..., Any]) -> Tool:
 		if not callable(f):
@@ -66,6 +93,9 @@ def tool(
 			func=f,
 			requires_confirmation=requires_confirmation,
 			confirm_prompt=confirm_prompt,
+			precheck=precheck,
+			final_answer=final_answer,
+			redirect=redirect,
 		)
 
 	return wrap(func) if func is not None else wrap
