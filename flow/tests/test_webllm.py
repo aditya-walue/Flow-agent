@@ -207,3 +207,38 @@ class TestBrowserRoundTrip(IntegrationTestCase):
 	def test_non_streaming_call_is_rejected(self):
 		with self.assertRaisesRegex(ValueError, "browser"):
 			Model(model_id="webllm/some-model").chat("hi")
+
+
+class TestStrictJson(UnitTestCase):
+	def test_schema_offers_reply_or_one_of_the_tools_with_its_own_arguments(self):
+		schema = webllm.response_schema([TOOL])
+		self.assertEqual(schema["anyOf"][0]["required"], ["reply"])
+		tool_option = schema["anyOf"][1]
+		self.assertEqual(tool_option["properties"]["tool"]["enum"], ["get_doc"])
+		self.assertEqual(tool_option["properties"]["arguments"], TOOL["function"]["parameters"])
+
+	def test_strict_replies_parse(self):
+		call = parse_reply('{"tool": "get_doc", "arguments": {"name": "1"}}', {}).tool_calls[0]
+		self.assertEqual((call.name, call.arguments), ("get_doc", {"name": "1"}))
+		answer = parse_reply('{"reply": "There are 3."}', {})
+		self.assertEqual((answer.content, answer.tool_calls), ("There are 3.", []))
+		# The tagged format still parses (older chats, or the browser's fallback).
+		self.assertEqual(parse_reply('<tool_call>{"name": "get_doc", "arguments": {}}</tool_call>', {}).tool_calls[0].name, "get_doc")
+
+	def test_strict_history_uses_the_json_format(self):
+		out = to_plain_messages(
+			[
+				{"role": "user", "content": "open 1"},
+				{"role": "assistant", "content": None, "tool_calls": [
+					{"id": "c1", "type": "function", "function": {"name": "get_doc", "arguments": '{"name": "1"}'}}
+				]},
+				{"role": "tool", "tool_call_id": "c1", "content": '{"status": "Open"}'},
+				{"role": "assistant", "content": "It is open."},
+			],
+			[TOOL],
+			strict=True,
+		)
+		self.assertIn('{"reply": ...}', out[0]["content"].replace('"<your answer>"', "..."))
+		self.assertEqual(out[2]["content"], '{"tool": "get_doc", "arguments": {"name": "1"}}')
+		self.assertTrue(out[3]["content"].startswith("Tool result:"))
+		self.assertEqual(out[4]["content"], '{"reply": "It is open."}')

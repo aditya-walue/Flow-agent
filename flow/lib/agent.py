@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import frappe
 from frappe import _
 
 from flow.lib.model import ChatResponse, Model, ToolCall, ToolCallBegin
@@ -252,7 +254,11 @@ class Agent:
 		routed = self._routed_response(messages) if route else None
 		failed_streak = 0
 		for iteration in range(1, self.max_iterations + 1):
-			response, routed = routed or self.model.chat(messages, tools=tool_schemas), None
+			if routed is not None:
+				response, routed = routed, None
+			else:
+				context, tools = self._model_context(messages, tool_schemas)
+				response = self.model.chat(context, tools=tools)
 			_accumulate_usage(usage_total, response.usage)
 			messages.append(_assistant_message(response))
 
@@ -330,7 +336,7 @@ class Agent:
 			if routed is not None:
 				response, routed = routed, None
 			else:
-				response = yield from self._stream_model(messages, tool_schemas)
+				response = yield from self._stream_model(*self._model_context(messages, tool_schemas))
 			_accumulate_usage(usage_total, response.usage)
 			messages.append(_assistant_message(response))
 
@@ -427,6 +433,21 @@ class Agent:
 				return None
 			answers.append(result["answer"])
 		return "\n\n".join(answers)
+
+	def _model_context(
+		self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]] | None
+	) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+		"""What one model call sees. A small browser model reads the whole prompt on every step
+		(seconds per thousand tokens), so it gets only the tools that fit the request and only
+		recent turns; server models get everything, as before. The transcript and the tools the
+		agent will run are untouched — this only trims the prompt."""
+		from flow.lib.webllm import is_browser_model
+
+		if not is_browser_model(getattr(self.model, "model_id", None)):
+			return messages, tool_schemas
+		if not frappe.conf.get("flow_webllm_compact_context", True):
+			return messages, tool_schemas
+		return _recent_turns(messages), _relevant_tools(messages, tool_schemas)
 
 	def _stream_model(
 		self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]] | None
@@ -534,6 +555,57 @@ class Agent:
 # Tools that return schema and help text, not data: an option they list ("Gender: Male / Female
 # / ...") is not a value the user chose.
 METADATA_TOOLS = frozenset({"find_doctypes", "describe", "creation_steps"})
+
+
+# Tools a request needs, by what it asks for (matched on the latest user message). The final-answer
+# tools mostly run through exact routes; these let the model reach them for looser phrasings.
+TOOL_GROUPS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = tuple(
+	(re.compile(pattern, re.IGNORECASE), tools)
+	for pattern, tools in (
+		(r"\b(error|exception|traceback|fail(s|ed|ing)?|not working|can'?t|cannot|won'?t|issue|problem|wrong)\b", ("error_diagnosis",)),
+		(r"\b(create|add|make|new|register|enter|record a)\b", ("create", "required_values", "find_doctypes")),
+		(r"\b(update|change|set|mark|close|rename|edit|modify)\b", ("update", "show_records", "find_doctypes")),
+		(r"\b(how (do|to|can|should)|steps?|guide|procedure)\b", ("creation_steps", "document_flow")),
+		(r"\b(what (is|are|does)|explain|mean(s|ing)?|define|difference|purpose)\b", ("explain_doctype", "document_flow")),
+		(r"\b(after|next|process|flow|workflow|approv\w*|cycle|stage)\b", ("document_flow",)),
+	)
+)
+# Looking things up is the most common need, and what the model falls back on.
+DEFAULT_TOOLS = ("show_records", "count", "read", "find_doctypes")
+MAX_TOOLS = 6
+RECENT_USER_TURNS = 2
+
+
+def _relevant_tools(
+	messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]] | None
+) -> list[dict[str, Any]] | None:
+	if not tool_schemas:
+		return tool_schemas
+	text = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
+	wanted: list[str] = []
+	for pattern, tools in TOOL_GROUPS:
+		if pattern.search(text):
+			wanted.extend(tools)
+	wanted.extend(DEFAULT_TOOLS)
+	# Tools already used this turn stay available, so a follow-up step can reuse them.
+	turn_start = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=0)
+	for m in messages[turn_start:]:
+		for tc in m.get("tool_calls") or []:
+			wanted.insert(0, tc["function"]["name"])
+	by_name = {t["function"]["name"]: t for t in tool_schemas}
+	chosen = [by_name[n] for n in dict.fromkeys(wanted) if n in by_name][:MAX_TOOLS]
+	return chosen or tool_schemas
+
+
+def _recent_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+	"""The system prompt plus the last RECENT_USER_TURNS user turns (with their tool calls and
+	results); older turns are dropped from the prompt, never from the stored transcript."""
+	users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+	if len(users) <= RECENT_USER_TURNS:
+		return messages
+	start = users[-RECENT_USER_TURNS]
+	system = [m for m in messages[:start] if m.get("role") == "system"]
+	return system + messages[start:]
 
 
 def _routed_call(name: str, arguments: dict[str, Any]) -> ChatResponse:

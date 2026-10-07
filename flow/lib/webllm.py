@@ -51,17 +51,53 @@ BARE_KEY_PATTERN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*:")
 
 @dataclass
 class BrowserRequest:
-	"""Stream event: run one model call in the browser and post the reply back under `id`."""
+	"""Stream event: run one model call in the browser and post the reply back under `id`.
+	`response_schema`, when set, is a JSON schema the browser enforces while decoding."""
 
 	id: str
 	model: str
 	messages: list[dict[str, str]]
 	params: dict[str, Any] = field(default_factory=dict)
+	response_schema: str | None = None
 
 
 @dataclass
 class Heartbeat:
 	"""Stream event with no content, sent while waiting on the browser."""
+
+
+def strict_json_enabled() -> bool:
+	"""Strict mode (site config `flow_webllm_strict_json`, on by default): the model answers with
+	one JSON object per step, enforced while decoding by a schema, instead of free text with
+	<tool_call> blocks — so a tool call can't be malformed, name an unknown tool, or pass an
+	argument the tool doesn't take."""
+	return bool(frappe.conf.get("flow_webllm_strict_json", True))
+
+
+def response_schema(tools: list[dict[str, Any]] | None) -> dict[str, Any]:
+	"""One object: {"reply": text}, or {"tool": <offered tool>, "arguments": <its parameters>}."""
+	options: list[dict[str, Any]] = [
+		{
+			"type": "object",
+			"properties": {"reply": {"type": "string"}},
+			"required": ["reply"],
+			"additionalProperties": False,
+		}
+	]
+	for tool in tools or []:
+		fn = tool["function"]
+		options.append(
+			{
+				"type": "object",
+				"properties": {
+					"tool": {"type": "string", "enum": [fn["name"]]},
+					"arguments": fn.get("parameters") or {"type": "object"},
+				},
+				"required": ["tool", "arguments"],
+				"additionalProperties": False,
+			}
+		)
+	return {"anyOf": options}
 
 
 def is_browser_model(model_id: str | None) -> bool:
@@ -86,11 +122,13 @@ def chat_stream(
 	frappe.cache.set_value(
 		_owner_key(request_id), frappe.session.user, expires_in_sec=REPLY_TIMEOUT + 60
 	)
+	strict = strict_json_enabled()
 	yield BrowserRequest(
 		id=request_id,
 		model=model_id.split("/", 1)[1],
-		messages=to_plain_messages(messages, tools),
+		messages=to_plain_messages(messages, tools, strict=strict),
 		params=params or {},
+		response_schema=json.dumps(response_schema(tools)) if strict else None,
 	)
 
 	reply = yield from _wait_for_reply(request_id)
@@ -134,7 +172,7 @@ def _wait_for_reply(request_id: str) -> Generator[Heartbeat, None, dict[str, Any
 
 
 def to_plain_messages(
-	messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+	messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, strict: bool = False
 ) -> list[dict[str, str]]:
 	"""Render an OpenAI-style transcript as system/user/assistant text messages, with the
 	tool schemas in the system prompt and tool calls/results as tagged text. Consecutive
@@ -166,30 +204,43 @@ def to_plain_messages(
 			add("user", content)
 		elif role == "assistant":
 			calls = [
-				"<tool_call>\n"
-				+ json.dumps(
-					{
-						"name": tc["function"]["name"],
-						"arguments": json.loads(tc["function"].get("arguments") or "{}"),
-					}
-				)
-				+ "\n</tool_call>"
+				_render_call(tc["function"]["name"], json.loads(tc["function"].get("arguments") or "{}"), strict)
 				for tc in message.get("tool_calls") or []
 				if tc["id"] not in malformed
 			]
-			text = "\n".join(filter(None, [content, *calls]))
+			if strict and not calls and content:
+				content = json.dumps({"reply": content}, ensure_ascii=False)
+			text = "\n".join(filter(None, [content if not (strict and calls) else "", *calls]))
 			if text:
 				add("assistant", text)
 		elif role == "tool" and message.get("tool_call_id") in malformed:
 			add("user", f"(Your last tool call could not be read: {_error_text(content)})")
 		elif role == "tool":
-			add("user", f"<tool_response>\n{content}\n</tool_response>")
+			add("user", f"Tool result:\n{content}" if strict else f"<tool_response>\n{content}\n</tool_response>")
 
 	if tools:
-		system_parts.append(_tools_prompt(tools))
+		system_parts.append(_strict_tools_prompt(tools) if strict else _tools_prompt(tools))
 	if system_parts:
 		out.insert(0, {"role": "system", "content": "\n\n".join(p for p in system_parts if p)})
 	return out
+
+
+def _parse_strict(text: str, usage: dict[str, Any]) -> ChatResponse | None:
+	stripped = (text or "").strip()
+	if not stripped.startswith("{") or "<tool_call>" in stripped:
+		return None
+	payload = _loads_lenient(stripped)
+	if not isinstance(payload, dict):
+		return None
+	usage = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+	if isinstance(payload.get("tool"), str):
+		arguments = payload.get("arguments")
+		raw = arguments if isinstance(arguments, str) else json.dumps(arguments if arguments is not None else {})
+		call = _build_tool_call(f"call_{frappe.generate_hash(length=12)}", payload["tool"], raw)
+		return ChatResponse(content=None, tool_calls=[call], finish_reason="tool_calls", usage=usage)
+	if isinstance(payload.get("reply"), str):
+		return ChatResponse(content=payload["reply"].strip() or None, tool_calls=[], finish_reason="stop", usage=usage)
+	return None
 
 
 def _error_text(content: str) -> str:
@@ -200,7 +251,11 @@ def _error_text(content: str) -> str:
 
 
 def parse_reply(text: str, usage: dict[str, Any]) -> ChatResponse:
-	"""Split a browser model's raw reply into prose and `<tool_call>` blocks."""
+	"""Read a browser model's raw reply: a strict-mode JSON object ({"reply"} or {"tool",
+	"arguments"}), or prose with `<tool_call>` blocks."""
+	strict = _parse_strict(text, usage)
+	if strict is not None:
+		return strict
 	tool_calls: list[ToolCall] = []
 	for raw in TOOL_CALL_PATTERN.findall(text):
 		call_id = f"call_{frappe.generate_hash(length=12)}"
@@ -339,6 +394,28 @@ def _balance_brackets(raw: str) -> str:
 		out.append(ch)
 	out.extend(closer[b] for b in reversed(stack))
 	return "".join(out)
+
+
+def _render_call(name: str, arguments: dict[str, Any], strict: bool) -> str:
+	if strict:
+		return json.dumps({"tool": name, "arguments": arguments}, ensure_ascii=False)
+	return "<tool_call>\n" + json.dumps({"name": name, "arguments": arguments}) + "\n</tool_call>"
+
+
+def _strict_tools_prompt(tools: list[dict[str, Any]]) -> str:
+	lines = "\n".join(
+		f"- {t['function']['name']}: {t['function'].get('description', '').strip()} "
+		f"Arguments: {json.dumps(t['function'].get('parameters', {}).get('properties', {}))}"
+		for t in tools
+	)
+	return (
+		"# Tools\n\n"
+		f"{lines}\n\n"
+		"Answer with exactly one JSON object:\n"
+		'- to use a tool: {"tool": "<name>", "arguments": {...}}\n'
+		'- to answer the user: {"reply": "<your answer>"}\n'
+		'A tool\'s output comes back as "Tool result:"; then reply or use another tool.'
+	)
 
 
 def _tools_prompt(tools: list[dict[str, Any]]) -> str:

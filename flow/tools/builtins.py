@@ -42,23 +42,17 @@ NamesArg = Annotated[
 ]
 FiltersArg = Annotated[
 	dict | None,
-	'Field conditions, e.g. {"status": "Paid"}, {"grand_total": [">", 1000]}, '
-	'{"name": ["in", ["ID-1", "ID-2"]]}. Omit for all records.',
+	'Conditions, e.g. {"status": "Paid"} or {"name": ["in", [IDs]]}. Omit for all.',
 ]
 
 
 @tool
 def find_doctypes(
-	search: Annotated[str | None, 'Part of the DocType name, e.g. "invoice" or "sales order".'] = None,
-	module: Annotated[str | None, 'Module filter, e.g. "Selling". Omit unless you are sure.'] = None,
-	limit: Annotated[int, "Max results (default 40)."] = 40,
+	search: Annotated[str | None, 'Part of the name, e.g. "invoice".'] = None,
+	module: Annotated[str | None, "Module; usually omit."] = None,
+	limit: Annotated[int, "Max results."] = 40,
 ) -> list[dict]:
-	"""Find the exact name of a DocType (a record type / table), e.g. "Sales Order".
-
-	Use when you are unsure of a DocType's exact name. Returns [{name, module}].
-	These are types, not records: one result does not mean one record exists —
-	use count or read for records.
-	"""
+	"""Find a DocType's (record type's) exact name by keyword. Returns types, not records."""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
 	filters: dict[str, Any] = {"istable": 0}
 	if module:
@@ -137,19 +131,11 @@ def describe(
 def read(
 	doctype: DocTypeArg,
 	filters: FiltersArg = None,
-	fields: Annotated[
-		list[str] | None,
-		'Fieldnames to return, e.g. ["name", "customer", "grand_total", "status"]. '
-		"Omit for the DocType's key columns.",
-	] = None,
-	limit: Annotated[int, "Max records (default 20, max 200)."] = 20,
-	order_by: Annotated[str | None, 'e.g. "creation desc" or "grand_total desc".'] = None,
+	fields: Annotated[list[str] | None, 'Fieldnames, e.g. ["status", "grand_total"]. Omit for key columns.'] = None,
+	limit: Annotated[int, "Max records."] = 20,
+	order_by: Annotated[str | None, 'e.g. "creation desc".'] = None,
 ) -> list[dict]:
-	"""Get records and their field values. Returns a list of {field: value}.
-
-	Use to list records or show details. To see specific records, filter by name:
-	filters={"name": ["in", [IDs from count/read]]}. Fieldnames come from describe.
-	"""
+	"""Get specific field values of records, as data for you to use."""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
 	return frappe.get_list(
 		doctype,
@@ -548,9 +534,7 @@ COUNT_NAMES_LIMIT = 20
 	route=lambda text: _route_count(text),
 )
 def count(doctype: DocTypeArg, filters: FiltersArg = None) -> dict[str, Any]:
-	"""Count records — use for "how many" questions. The count and the matching records' IDs
-	(up to 20, newest first) are shown to the user directly.
-	"""
+	"""Count records ("how many"). Shown to the user directly."""
 	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*", "as": "count"}])
 	total = int(rows[0]["count"]) if rows else 0
 	# Real IDs up front: small models otherwise invent plausible-looking record names.
@@ -1434,16 +1418,10 @@ def create(
 	doctype: DocTypeArg,
 	records: Annotated[
 		list[dict[str, Any]],
-		"One object per record to create, keyed by fieldname. Child-table rows go in a list "
-		'under the table field, e.g. [{"customer": "<customer>", "items": [{"item_code": "<item code>", '
-		'"qty": <quantity>, "rate": <rate>}]}].',
+		'One object per record, by field. Item rows go in their table: {"items": [{"item_code": ..., "qty": ..., "rate": ...}]}.',
 	],
 ) -> dict[str, Any]:
-	"""Create new records. Returns {created: [IDs], failures: [...]}. The user approves first.
-
-	Only when the user asked to create and gave the values. describe the DocType first for its
-	required fields; Link values must be existing record names (use item codes, not item names).
-	"""
+	"""Create records with values the user gave. The user approves first."""
 	if not frappe.has_permission(doctype, "create"):
 		raise PermissionError(f"No permission to create {doctype}")
 
@@ -1622,6 +1600,7 @@ def run_action(
 	return result
 
 
+from flow.tools.answers import document_flow, explain_doctype, show_records  # noqa: E402
 from flow.tools.diagnosis import error_diagnosis  # noqa: E402
 
 BUILTIN_TOOLS: list[Tool] = [
@@ -1631,6 +1610,9 @@ BUILTIN_TOOLS: list[Tool] = [
 	required_values,
 	small_talk,
 	error_diagnosis,
+	show_records,
+	explain_doctype,
+	document_flow,
 	read,
 	count,
 	search_knowledge,

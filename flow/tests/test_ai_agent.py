@@ -796,3 +796,39 @@ class TestAgentMalformedToolCall(UnitTestCase):
 		self.assertEqual(result.output, "recovered")
 		tool_msg = next(m for m in result.messages if m["role"] == "tool")
 		self.assertIn("Invalid JSON", json.loads(tool_msg["content"])["error"])
+
+
+class TestBrowserModelContext(UnitTestCase):
+	"""A browser model's prompt carries only relevant tools and recent turns."""
+
+	def _schemas(self, *names):
+		return [{"type": "function", "function": {"name": n, "description": "", "parameters": {}}} for n in names]
+
+	def test_tools_follow_the_request(self):
+		from flow.lib.agent import _relevant_tools
+
+		schemas = self._schemas("show_records", "count", "read", "find_doctypes", "create", "required_values", "error_diagnosis", "document_flow")
+		pick = lambda text: [t["function"]["name"] for t in _relevant_tools([{"role": "user", "content": text}], schemas)]  # noqa: E731
+		self.assertEqual(pick("show me the invoices"), ["show_records", "count", "read", "find_doctypes"])
+		self.assertEqual(pick("create a quotation")[:2], ["create", "required_values"])
+		self.assertEqual(pick("why does my invoice fail")[0], "error_diagnosis")
+
+	def test_tools_used_this_turn_stay_available(self):
+		from flow.lib.agent import _relevant_tools
+
+		schemas = self._schemas("show_records", "count", "read", "find_doctypes", "describe")
+		messages = [
+			{"role": "user", "content": "show me the invoices"},
+			{"role": "assistant", "content": None, "tool_calls": [{"id": "a", "function": {"name": "describe", "arguments": "{}"}}]},
+		]
+		self.assertEqual(_relevant_tools(messages, schemas)[0]["function"]["name"], "describe")
+
+	def test_only_recent_turns_are_sent(self):
+		from flow.lib.agent import RECENT_USER_TURNS, _recent_turns
+
+		messages = [{"role": "system", "content": "rules"}]
+		for i in range(5):
+			messages += [{"role": "user", "content": f"q{i}"}, {"role": "assistant", "content": f"a{i}"}]
+		trimmed = _recent_turns(messages)
+		self.assertEqual(trimmed[0]["role"], "system")
+		self.assertEqual([m["content"] for m in trimmed if m["role"] == "user"], [f"q{i}" for i in range(5 - RECENT_USER_TURNS, 5)])

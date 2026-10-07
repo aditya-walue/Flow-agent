@@ -26,23 +26,20 @@ DEFAULT_AGENT_TOOLS = (
 	"error_diagnosis",
 	"required_values",
 	"small_talk",
+	"show_records",
+	"explain_doctype",
+	"document_flow",
 )
-DEFAULT_AGENT_INSTRUCTIONS = """You help the user with their ERPNext / Frappe site. You can look things up with tools. Follow these rules exactly.
+DEFAULT_AGENT_INSTRUCTIONS = """You answer questions about the user's ERPNext / Frappe data using tools.
 
 RULES
-0. Greetings, thanks or small talk ("hi", "hii", "thanks", "ok"): reply in one short friendly line and offer help. Do NOT call any tool.
-1. Never invent data. Every customer, item, record name, field or value you mention must come from a tool result or from the user.
-2. Questions ("how many", "show", "list", "what is") -> look it up:
-   - how many -> count(doctype). It also returns the record names.
-   - details -> read(doctype, filters={"name": ["in", [names]]}, fields=[...]).
-3. "How do I / how to / give me the steps" -> call creation_steps(doctype) and give the user its steps exactly as returned. Do NOT call create or update for a how-to question.
-4. When the user asks to create/add a record and gives values, call create RIGHT AWAY with those values (field labels and typed dates are fine). Flow checks every value and the user approves before anything is saved. If they gave no values, call required_values(doctype). Never invent values.
-5. Child tables: line items go inside their table field, e.g. Sales Invoice / Sales Order use "items": [{"item_code": ..., "qty": ..., "rate": ...}]. Use item codes, not item names.
-6. If a tool returns an error, read it and fix that exact problem. If you cannot, tell the user plainly and stop.
-7. After a successful create or update, reply with the record ID, its link from the tool result (/desk/<doctype>/<ID>), and the values you saved, one per line.
-8. The user pastes an error message or asks why something failed -> call error_diagnosis(error) with the full text they pasted. Do not guess the cause yourself.
+1. Use only data from tool results or the user. Never invent names, IDs or values.
+2. Data questions: show_records (records, lists, details), count (how many), read (specific fields).
+3. "How do I..." -> creation_steps. "What is..." -> explain_doctype. "What happens after..." -> document_flow. Errors -> error_diagnosis.
+4. To create or change a record the user asked for, call create / update with the values they gave; if values are missing, call required_values. The user approves before anything is saved.
+5. If a tool returns an error, fix that exact problem or tell the user briefly.
 
-STYLE: short, plain answers. One sentence before each tool call saying what you are checking."""
+Reply in short, plain sentences."""
 
 
 def sync_default_assistant() -> None:

@@ -53,6 +53,34 @@ function visibleText(full) {
 	return full;
 }
 
+// Strict mode: the reply is one JSON object. While it streams, show only the text of its
+// "reply" field (decoding JSON string escapes); a {"tool": ...} object shows nothing.
+function strictVisibleText(full) {
+	const match = full.match(/^\s*\{\s*"reply"\s*:\s*"/);
+	if (!match) return "";
+	let out = "";
+	for (let i = match[0].length; i < full.length; i++) {
+		const ch = full[i];
+		if (ch === '"') break;
+		if (ch !== "\\") {
+			out += ch;
+			continue;
+		}
+		const next = full[i + 1];
+		if (next === undefined) break; // escape still streaming in
+		if (next === "u") {
+			const hex = full.slice(i + 2, i + 6);
+			if (hex.length < 4) break;
+			out += String.fromCharCode(parseInt(hex, 16));
+			i += 5;
+			continue;
+		}
+		out += { n: "\n", t: "\t", r: "", b: "", f: "" }[next] ?? next;
+		i += 1;
+	}
+	return out;
+}
+
 // Run one model call. Streams visible text through `onText` and returns
 // { content, usage } with the raw reply (tool-call blocks included) for the server.
 export async function runBrowserRequest(request, { onText, onStatus, signal }) {
@@ -72,16 +100,29 @@ export async function runBrowserRequest(request, { onText, onStatus, signal }) {
 
 	const onAbort = () => eng.interruptGenerate();
 	signal?.addEventListener("abort", onAbort);
+	const base = { ...params, messages: request.messages, stream: true, stream_options: { include_usage: true } };
+	let strict = Boolean(request.response_schema);
 	try {
-		const chunks = await eng.chat.completions.create({
-			// End the turn once a tool call is written: past it a small model rambles or invents
-			// the tool's result. The server's parser accepts a call without its closing tag.
-			stop: STOP_SEQUENCES,
-			...params,
-			messages: request.messages,
-			stream: true,
-			stream_options: { include_usage: true },
-		});
+		let chunks;
+		try {
+			chunks = await eng.chat.completions.create(
+				strict
+					? // Decoding is constrained to the schema: the reply can only be valid JSON
+					  // naming an offered tool with its own arguments, or a {"reply": ...}.
+					  { ...base, response_format: { type: "json_object", schema: request.response_schema } }
+					: // End the turn once a tool call is written: past it a small model rambles or
+					  // invents the tool's result. The server accepts a call without its closing tag.
+					  { stop: STOP_SEQUENCES, ...base }
+			);
+		} catch (e) {
+			if (!strict || signal?.aborted) throw e;
+			// The schema couldn't be compiled for this model: fall back to the tagged format,
+			// which the server still parses.
+			console.warn("Flow: strict JSON decoding unavailable, falling back", e);
+			strict = false;
+			chunks = await eng.chat.completions.create({ stop: STOP_SEQUENCES, ...base });
+		}
+		const visibleOf = strict ? strictVisibleText : visibleText;
 
 		let full = "";
 		let shown = 0;
@@ -90,7 +131,7 @@ export async function runBrowserRequest(request, { onText, onStatus, signal }) {
 			const delta = chunk.choices?.[0]?.delta?.content;
 			if (delta) {
 				full += delta;
-				const visible = visibleText(full);
+				const visible = visibleOf(full);
 				if (visible.length > shown) {
 					onText(visible.slice(shown));
 					shown = visible.length;
