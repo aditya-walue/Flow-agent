@@ -117,8 +117,9 @@ class TestStartRun(IntegrationTestCase):
 	def test_start_run_without_agent_uses_default_assistant(self):
 		from flow.assistant import ASSISTANT_AGENT_TITLE
 
+		# Not a greeting: those are answered by the small_talk route without the model.
 		with patch.object(Model, "chat", return_value=_final("hello")):
-			payload = start_run("hi")
+			payload = start_run("summarise my open tasks")
 
 		self.assertEqual(payload["status"], "Completed")
 		self.assertEqual(payload["output"], "hello")

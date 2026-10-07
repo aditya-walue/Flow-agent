@@ -38,7 +38,7 @@ def _summarize_values(values: dict) -> str:
 DocTypeArg = Annotated[str, 'Exact DocType name, e.g. "Sales Invoice", "Customer", "Item".']
 NamesArg = Annotated[
 	list[str],
-	'Record IDs, e.g. ["ACC-SINV-2026-00008"]. Take them from count/read results — never make them up.',
+	"Record IDs exactly as count/read returned them — never make them up.",
 ]
 FiltersArg = Annotated[
 	dict | None,
@@ -277,11 +277,11 @@ GREETING = re.compile(
 )
 THANKS = re.compile(r"^\s*(thanks?|thank\s+you|thx|ty|ok(ay)?|cool|great|nice|got\s+it)\b[\s!.,]*(so\s+much|a\s+lot|flow)?[\s!.]*$", re.IGNORECASE)
 CAPABILITIES = (
-	"I can help with your ERPNext data:\n"
-	"- **Count** records: *how many employees are there?*\n"
-	"- **Show** details: *show the details of ACC-SINV-2026-00008*\n"
-	"- **Explain** how to create something: *how to create a sales order?*\n"
-	"- **Create** records for you: *create a todo with description call vendor*\n"
+	"I can help with your data:\n"
+	"- **Count** records: *how many <records> are there?*\n"
+	"- **Show** details: *show the details of <record ID>*\n"
+	"- **Explain** how to create something: *how to create a <record type>?*\n"
+	"- **Create** records for you: *create a <record type> with <field> <value>, ...*\n"
 	"- **Diagnose** an error: paste the error message"
 )
 
@@ -658,19 +658,20 @@ def _parse_values(doctype: str, text: str) -> dict[str, Any] | None:
 
 def _route_count(text: str) -> dict[str, Any] | None:
 	match = COUNT_QUESTION.match(text)
-	doctype = match and _doctype_from_phrase(match.group("what"))
+	doctype = match and _doctype_from_phrase(match.group("what"), fuzzy=True)
 	return {"doctype": doctype} if doctype else None
 
 
 def _route_creation_steps(text: str) -> dict[str, Any] | None:
 	match = HOW_TO_QUESTION.match(text)
-	doctype = match and _doctype_from_phrase(match.group("what"))
+	doctype = match and _doctype_from_phrase(match.group("what"), fuzzy=True)
 	return {"doctype": doctype} if doctype else None
 
 
-def _doctype_from_phrase(phrase: str) -> str | None:
+def _doctype_from_phrase(phrase: str, fuzzy: bool = False) -> str | None:
 	"""The readable, non-child DocType a phrase names, allowing plurals ("sales invoices",
-	"employees", "entries") and a trailing "record(s)". None unless it's an exact name."""
+	"employees", "entries") and a trailing "record(s)". With `fuzzy`, also a misspelling
+	("employyes", "sales invocies") when one DocType is clearly the closest; None otherwise."""
 	words = re.sub(r"\s+", " ", (phrase or "").strip().lower())
 	words = re.sub(r"\s+(records?|entries|documents?)$", "", words)
 	if not words:
@@ -687,6 +688,44 @@ def _doctype_from_phrase(phrase: str) -> str | None:
 		doctype = names.get(candidate)
 		if doctype and frappe.has_permission(doctype, "read"):
 			return doctype
+	if fuzzy:
+		doctype = _closest_doctype(candidates, names)
+		if doctype and frappe.has_permission(doctype, "read"):
+			return doctype
+	return None
+
+
+# A misspelling must be this similar to a DocType name, and this much closer than the runner-up,
+# to be read as that DocType ("employyes" -> Employee, but not "system" -> System Console).
+FUZZY_MIN_RATIO = 0.85
+FUZZY_MIN_LEAD = 0.05
+
+
+def _closest_doctype(candidates: list[str], names: dict[str, str]) -> str | None:
+	import difflib
+
+	scores: dict[str, float] = {}
+	for candidate in candidates:
+		if len(candidate) < 5:  # short words are too easy to confuse
+			continue
+		for key in difflib.get_close_matches(candidate, names, n=5, cutoff=FUZZY_MIN_RATIO):
+			ratio = difflib.SequenceMatcher(None, candidate, key).ratio()
+			scores[key] = max(scores.get(key, 0.0), ratio)
+	ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+	if not ranked or (len(ranked) > 1 and ranked[0][1] - ranked[1][1] < FUZZY_MIN_LEAD):
+		return None
+	return names[ranked[0][0]]
+
+
+def _find_doctype_in_text(text: str) -> str | None:
+	"""The DocType a free-form message names ("how do I raise a sales invoice for test?" ->
+	Sales Invoice): the longest run of up to 4 consecutive words that is a DocType name."""
+	words = re.findall(r"[a-z][a-z\-]*", (text or "").lower())
+	for size in range(min(4, len(words)), 0, -1):
+		for start in range(len(words) - size + 1):
+			doctype = _doctype_from_phrase(" ".join(words[start : start + size]))
+			if doctype:
+				return doctype
 	return None
 
 
@@ -1116,8 +1155,8 @@ def _value_fits(field: Any, value: Any) -> bool:
 
 
 def _resolve_links_error(doctype: str | None, records: list[dict[str, Any]]) -> str | None:
-	"""Swap a Link value that is a record's display name for its ID ("Test Annual Maintenance
-	Contract" -> TEST-AMC-SVC), in place. Errors when no record, or more than one, matches."""
+	"""Swap a Link value that is a record's display name for its ID (an item's name for its item
+	code), in place. Errors when no record, or more than one, matches."""
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return None
 	problems = []
@@ -1210,7 +1249,7 @@ def _precheck_update(args: dict[str, Any], context: str | None = None) -> str | 
 
 def _update_to_create(args: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
 	"""An update whose records all don't exist, carrying values, is a request to make a new
-	record ("create a user ..." sent as update of User 'HR-00003'): run it as a create, which
+	record (a "create a user" request sent as an update of a User ID that doesn't exist): run it as a create, which
 	applies its own checks and asks the user to approve."""
 	doctype, names, values = args.get("doctype"), args.get("names"), args.get("values")
 	if not (isinstance(values, dict) and values and isinstance(names, list) and names):
@@ -1237,7 +1276,8 @@ def _precheck_names(args: dict[str, Any], context: str | None = None) -> str | N
 	doctype = args.get("doctype") or ""
 	if not frappe.db.exists("DocType", doctype):
 		return None  # let the tool report the unknown DocType
-	# A record named by its title ("Aditya" for HR-EMP-00003) resolves to its ID when exactly one matches.
+	# A record named by its title (an employee's name for their ID) resolves to its ID when
+	# exactly one record matches.
 	resolved = []
 	for n in names:
 		if isinstance(n, str) and not frappe.db.exists(doctype, {"name": n}):
@@ -1323,7 +1363,7 @@ def _is_grounded(value: Any, context: str) -> bool:
 		return True
 	if DATE_PATTERN.match(text):
 		return any(_mentions(context, form) for form in _date_forms(text[:10]))
-	# Built from what the user typed ("Darshan K." from "darshan" and "k"): every word must appear.
+	# Built from what the user typed (an initial written "K." when they typed "k"): every word must appear.
 	words = WORD_PATTERN.findall(text)
 	return bool(words) and all(_mentions(context, w) for w in words if len(w) > 1)
 
@@ -1374,7 +1414,7 @@ def _field_facts(doctype: str | None) -> tuple[dict[str, str], dict[str, str]]:
 
 
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
-# Dots only inside a word, so "john.smith@example.com" stays whole but "K." matches "k".
+# Dots only inside a word, so an email address stays one token but an initial "K." matches "k".
 WORD_PATTERN = re.compile(r"[\w@+-]+(?:\.[\w@+-]+)*")
 
 
@@ -1395,8 +1435,8 @@ def create(
 	records: Annotated[
 		list[dict[str, Any]],
 		"One object per record to create, keyed by fieldname. Child-table rows go in a list "
-		'under the table field, e.g. [{"customer": "test", "items": [{"item_code": "TEST-MOUSE-WL", '
-		'"qty": 2, "rate": 650}]}].',
+		'under the table field, e.g. [{"customer": "<customer>", "items": [{"item_code": "<item code>", '
+		'"qty": <quantity>, "rate": <rate>}]}].',
 	],
 ) -> dict[str, Any]:
 	"""Create new records. Returns {created: [IDs], failures: [...]}. The user approves first.

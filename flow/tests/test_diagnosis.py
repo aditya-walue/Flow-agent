@@ -17,7 +17,7 @@ class TestErrorDiagnosis(IntegrationTestCase):
 			error="Message\nIcon is not correctly configured please check the workspace sidebar to it"
 		)["answer"]
 		self.assertIn("frappe/frappe/desk/page/desktop/desktop.js", answer)
-		self.assertIn("**Workspace Sidebar**", answer)
+		self.assertIn("**Where it comes from**", answer)
 
 	def test_finds_a_templated_message_by_its_fixed_start(self):
 		answer = error_diagnosis(error="Could not find Row #1: Item: Some Unknown Item")["answer"]

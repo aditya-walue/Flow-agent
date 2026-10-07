@@ -405,8 +405,8 @@ class TestMadeUpValues(IntegrationTestCase):
 
 		result = self._invoke(
 			create,
-			{"doctype": "ToDo", "records": [{"description": "Call Darshan K.", "date": "2026-10-05", "priority": "Medium"}]},
-			"create a todo: call darshan k on 5 Oct 2026",  # priority Medium is ToDo's default
+			{"doctype": "ToDo", "records": [{"description": "Call Vendor K.", "date": "2026-10-05", "priority": "Medium"}]},
+			"create a todo: call vendor k on 5 Oct 2026",  # priority Medium is ToDo's default
 		)
 		self.assertIsInstance(result, Question)
 
@@ -419,8 +419,8 @@ class TestMadeUpValues(IntegrationTestCase):
 	def test_date_with_only_the_right_year_is_rejected(self):
 		result = self._invoke(
 			create,
-			{"doctype": "ToDo", "records": [{"description": "call darshan", "date": "2026-01-01"}]},
-			"todo: call darshan on 01-09-2026",
+			{"doctype": "ToDo", "records": [{"description": "call vendor", "date": "2026-01-01"}]},
+			"todo: call vendor on 01-09-2026",
 		)
 		self.assertIn("date=2026-01-01", json.loads(result)["error"])
 
@@ -429,8 +429,8 @@ class TestMadeUpValues(IntegrationTestCase):
 
 		result = self._invoke(
 			create,
-			{"doctype": "ToDo", "records": [{"description": "call darshan", "date": "2026-09-01"}]},
-			"todo: call darshan on 01-09-2026",
+			{"doctype": "ToDo", "records": [{"description": "call vendor", "date": "2026-09-01"}]},
+			"todo: call vendor on 01-09-2026",
 		)
 		self.assertIsInstance(result, Question)
 
@@ -440,13 +440,13 @@ class TestMadeUpValues(IntegrationTestCase):
 
 		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create])
 		messages = [
-			{"role": "user", "content": "create todo call darshan"},
+			{"role": "user", "content": "create todo call vendor"},
 			{"role": "assistant", "content": None, "tool_calls": [
 				{"id": "s1", "type": "function", "function": {"name": "creation_steps", "arguments": "{}"}}
 			]},
 			{"role": "tool", "tool_call_id": "s1", "content": "Priority (High / Medium / Low)"},
 		]
-		call = ToolCall(id="c1", name="create", arguments={"doctype": "ToDo", "records": [{"description": "call darshan", "priority": "High"}]})
+		call = ToolCall(id="c1", name="create", arguments={"doctype": "ToDo", "records": [{"description": "call vendor", "priority": "High"}]})
 		self.assertIn("priority=High", json.loads(agent._invoke(call, messages))["error"])
 
 
@@ -459,8 +459,8 @@ class TestRunActionPrecheck(IntegrationTestCase):
 		return agent._invoke(ToolCall(id="c1", name="run_action", arguments=arguments), [])
 
 	def test_missing_record_points_to_create(self):
-		error = json.loads(self._invoke({"doctype": "ToDo", "names": ["Aditya"], "action": "submit"}))["error"]
-		self.assertIn("No ToDo record with ID 'Aditya'", error)
+		error = json.loads(self._invoke({"doctype": "ToDo", "names": ["Nobody Known"], "action": "submit"}))["error"]
+		self.assertIn("No ToDo record with ID 'Nobody Known'", error)
 		self.assertIn("call create", error)
 
 	def test_unavailable_action_lists_the_valid_ones(self):
@@ -525,8 +525,8 @@ class TestGeneralCreateChecks(IntegrationTestCase):
 
 	def test_value_inside_a_longer_typo_is_not_grounded(self):
 		result = self._invoke(
-			{"doctype": "ToDo", "records": [{"description": "call darshan", "date": "2002-06-01"}]},
-			"todo: call darshan on 01-06-20023",
+			{"doctype": "ToDo", "records": [{"description": "call vendor", "date": "2002-06-01"}]},
+			"todo: call vendor on 01-06-20023",
 		)
 		self.assertIn("date=2002-06-01", json.loads(result)["error"])
 
@@ -559,9 +559,9 @@ class TestUpdateRedirect(IntegrationTestCase):
 		from flow.lib.model import Model, ToolCall
 
 		agent = Agent(model=Model(model_id="openai/gpt-4o-mini"), tools=[create, update])
-		call = ToolCall(id="c1", name="update", arguments={"doctype": "ToDo", "names": ["HR-00003"], "values": {"description": "call aditya"}})
+		call = ToolCall(id="c1", name="update", arguments={"doctype": "ToDo", "names": ["UNKNOWN-0001"], "values": {"description": "call supplier"}})
 		messages = [
-			{"role": "user", "content": "todo: call aditya"},
+			{"role": "user", "content": "todo: call supplier"},
 			{"role": "assistant", "content": None, "tool_calls": [
 				{"id": "c1", "type": "function", "function": {"name": "update", "arguments": "{}"}}
 			]},
@@ -570,7 +570,7 @@ class TestUpdateRedirect(IntegrationTestCase):
 
 		self.assertIsInstance(result, Question)
 		self.assertEqual(call.name, "create")
-		self.assertEqual(call.arguments["records"], [{"description": "call aditya"}])
+		self.assertEqual(call.arguments["records"], [{"description": "call supplier"}])
 		self.assertEqual(messages[1]["tool_calls"][0]["function"]["name"], "create")
 
 	def test_update_of_existing_record_is_left_alone(self):
@@ -661,7 +661,7 @@ class TestCreateRouting(IntegrationTestCase):
 			_route_create("create a todo with description call vendor, priority High"),
 			{"doctype": "ToDo", "records": [{"description": "call vendor", "priority": "High"}]},
 		)
-		self.assertIsNone(_route_create("create a todo for HR-00003"))  # unknown part: model decides
+		self.assertIsNone(_route_create("create a todo for UNKNOWN-0001"))  # unknown part: model decides
 
 	def test_request_without_values_asks_for_them(self):
 		from flow.lib.agent import Agent
@@ -699,3 +699,14 @@ class TestSmallTalk(IntegrationTestCase):
 		result = Agent(model=model, tools=[small_talk, count]).run("hii")
 		model.chat.assert_not_called()
 		self.assertIn("**Count** records", result.output)
+
+
+class TestTypoTolerantRoutes(IntegrationTestCase):
+	def test_misspelt_doctypes_route_but_ordinary_words_do_not(self):
+		from flow.tools.builtins import _route_count, _route_creation_steps
+
+		self.assertEqual(_route_count("how many todso are there"), {"doctype": "ToDo"})
+		self.assertEqual(_route_count("how many notifcations are there?"), {"doctype": "Notification"})
+		self.assertEqual(_route_creation_steps("how to create a new notifcation"), {"doctype": "Notification"})
+		self.assertIsNone(_route_count("how many people work here"))
+		self.assertIsNone(_route_count("how many systems"))

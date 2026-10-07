@@ -1,0 +1,152 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-05 00:00:00",
+ "description": "Laya's routing decision for one chat message: the predicted intent, its confidence and distribution, and whether Flow routed to a tool or fell back to the chat model.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "run",
+  "outcome",
+  "intent",
+  "confidence",
+  "tool",
+  "column_break_main",
+  "latency_ms",
+  "model",
+  "asks_count",
+  "complexity",
+  "section_break_detail",
+  "input",
+  "reason",
+  "distribution",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "run",
+   "fieldtype": "Link",
+   "label": "Run",
+   "read_only": 1,
+   "options": "Flow Run",
+   "in_list_view": 0,
+   "search_index": 1
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Select",
+   "label": "Outcome",
+   "read_only": 1,
+   "options": "Routed\nFallback\nError",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "intent",
+   "fieldtype": "Data",
+   "label": "Intent",
+   "read_only": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "confidence",
+   "fieldtype": "Float",
+   "label": "Confidence",
+   "read_only": 1,
+   "in_list_view": 1,
+   "precision": "4"
+  },
+  {
+   "fieldname": "tool",
+   "fieldtype": "Data",
+   "label": "Routed To",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "latency_ms",
+   "fieldtype": "Int",
+   "label": "Latency (ms)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "model",
+   "fieldtype": "Data",
+   "label": "Laya Checkpoint",
+   "read_only": 1
+  },
+  {
+   "fieldname": "asks_count",
+   "fieldtype": "Float",
+   "label": "Asks For A Count",
+   "read_only": 1,
+   "precision": "4"
+  },
+  {
+   "fieldname": "complexity",
+   "fieldtype": "Float",
+   "label": "Complexity (0-2)",
+   "read_only": 1,
+   "precision": "4"
+  },
+  {
+   "fieldname": "section_break_detail",
+   "fieldtype": "Section Break",
+   "label": "Detail"
+  },
+  {
+   "fieldname": "input",
+   "fieldtype": "Small Text",
+   "label": "Input",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Data",
+   "label": "Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "distribution",
+   "fieldtype": "JSON",
+   "label": "Intent Distribution",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-10-05 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Flow",
+ "name": "Flow Route Log",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "delete": 1,
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "role": "System Manager"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "intent",
+ "track_changes": 0
+}

@@ -101,18 +101,12 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str, str], ...] = tuple(
 		(
 			r"not a valid (phone|email|url)|invalid (phone|email|url)",
 			"A phone number, email or URL isn't in a valid format.",
-			"Correct the value's format (e.g. +919876543210, name@example.com).",
+			"Correct the value's format: a phone number with its country code, or a full email address.",
 		),
 		(
 			r"session expired|csrf|invalid request|login required|authenticationerror",
 			"Your login session expired.",
 			"Reload the page and log in again.",
-		),
-		(
-			r"icon is not correctly configured",
-			"A desktop icon has nothing to open: its Workspace Sidebar is missing or has no links.",
-			"Open the **Workspace Sidebar** with the same name as the icon and add a **Link** row, "
-			"or set the icon's **Desktop Icon** record to an External link, or hide it.",
 		),
 	)
 )

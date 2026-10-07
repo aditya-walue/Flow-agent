@@ -121,7 +121,7 @@ class TestParseReply(UnitTestCase):
 		# Real Qwen 2.5 3B output: the `records` list is never closed.
 		response = parse_reply(
 			'<tool_call>{"name": "create", "arguments": {"doctype": "Sales Invoice", "records": '
-			'[{"customer": "test", "items": [{"description": "TEST-MONITOR-24", "rate": 100, "qty": 3}]}}}'
+			'[{"customer": "Acme", "items": [{"description": "ITEM-0001", "rate": 100, "qty": 3}]}}}'
 			"</tool_call>",
 			{},
 		)

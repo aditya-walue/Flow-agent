@@ -462,9 +462,13 @@ class Agent:
 			except Exception:
 				arguments = None
 			if arguments:
-				call = ToolCall(id=f"route_{uuid.uuid4().hex[:12]}", name=tool.name, arguments=arguments)
-				return ChatResponse(content=None, tool_calls=[call])
-		return None
+				return _routed_call(tool.name, arguments)
+		# No exact route: let the optional Laya classifier pick a read-only tool when it's
+		# confident; it returns None (chat model as usual) when disabled, unsure or unavailable.
+		from flow.lib import laya_router
+
+		laya = laya_router.route(last["content"], set(self._tools_by_name))
+		return _routed_call(*laya) if laya else None
 
 	def _pending_calls(self, messages: list[dict[str, Any]]) -> list[ToolCall]:
 		"""Tool calls in the transcript that have no tool result yet (awaiting an answer)."""
@@ -530,6 +534,12 @@ class Agent:
 # Tools that return schema and help text, not data: an option they list ("Gender: Male / Female
 # / ...") is not a value the user chose.
 METADATA_TOOLS = frozenset({"find_doctypes", "describe", "creation_steps"})
+
+
+def _routed_call(name: str, arguments: dict[str, Any]) -> ChatResponse:
+	"""A routed tool call, shaped like a model response that made it."""
+	call = ToolCall(id=f"route_{uuid.uuid4().hex[:12]}", name=name, arguments=arguments)
+	return ChatResponse(content=None, tool_calls=[call])
 
 
 def _grounding_text(messages: list[dict[str, Any]]) -> str:

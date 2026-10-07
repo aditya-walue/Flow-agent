@@ -124,6 +124,20 @@ bench --site site-name install-app flow
 
 Then add a `Flow Provider` with your API key and a `Flow Model` with a model ID such as `anthropic/claude-sonnet-4-6`, and open the Desk Flow panel to start. For local providers like Ollama or LM Studio, set `Base URL` on the provider or model.
 
+### Optional: Laya decision layer
+
+[Laya](https://github.com/NandhaKishorM/laya) is a small classifier that runs inside Flow's Python code, before the chat model. It labels each message (how-to, record lookup, troubleshooting, create, definition, workflow, small talk) with a calibrated confidence; when it is confident, Flow answers with a read-only tool directly, and otherwise the chat model handles the message as usual. Laya never creates, changes or deletes data.
+
+It is off by default and needs PyTorch, so it is an optional extra:
+
+```bash
+./env/bin/pip install -e "apps/flow[laya]"
+bench --site site-name set-config flow_laya_enabled 1 --parse
+bench --site site-name set-config flow_laya_threshold 0.8 --parse   # optional, default 0.8
+```
+
+The first message after each server start loads the model (about 10 s); later ones take about 150 ms. Every decision is recorded in `Flow Route Log`, and `flow.api.laya_metrics` summarises routed, fallback and error rates. If the package is missing or fails, Flow falls back to the chat model.
+
 ## License
 
 [GNU AGPLv3](license.txt)

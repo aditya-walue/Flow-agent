@@ -44,6 +44,7 @@ ignore_links_on_delete = ["Flow Knowledge Chunk", "Flow Run", "Flow Session"]
 
 default_log_clearing_doctypes = {
 	"Flow Session": 90,
+	"Flow Route Log": 30,
 }
 
 scheduler_events = {
@@ -57,6 +58,7 @@ scheduler_events = {
 	},
 }
 
-after_migrate = ["flow.assistant.sync_builtin_assistant"]
+after_install = ["flow.assistant.default.sync_default_assistant"]
+after_migrate = ["flow.assistant.sync_builtin_assistant", "flow.assistant.default.sync_default_assistant"]
 
 extend_bootinfo = "flow.boot.boot_session"

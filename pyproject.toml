@@ -17,6 +17,11 @@ dependencies = [
     "onnxruntime<2,>=1.27",
 ]
 
+[project.optional-dependencies]
+# Optional Laya decision layer (flow/lib/laya_router.py). Pulls in PyTorch, so it's opt-in:
+#   ./env/bin/pip install -e "apps/flow[laya]"   then   bench --site <site> set-config flow_laya_enabled 1 --parse
+laya = ["laya>=0.3.27,<0.4"]
+
 [build-system]
 requires = ["flit_core >=3.4,<4"]
 build-backend = "flit_core.buildapi"

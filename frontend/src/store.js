@@ -64,9 +64,12 @@ async function loadInitial() {
 		const [a, m] = await Promise.all([api.loadAgents(), api.loadModels(), refreshHistory()]);
 		agents.value = a;
 		models.value = m;
+		// The site's default agent (with its browser model) for every chat: the panel offers
+		// no agent or model choice. Older setups without one keep the previous selection.
+		const preset = a.find((x) => x.name === frappe.boot.flow_default_agent);
 		const last = a.find((x) => x.name === readLastAgent());
 		const assistant = a.find((x) => x.name === "Flow");
-		selectedAgent.value = (last || assistant || a[0])?.name ?? null;
+		selectedAgent.value = (preset || last || assistant || a[0])?.name ?? null;
 		loadToolApproval(selectedAgent.value);
 		loaded.value = true;
 		focusTick.value++;
@@ -136,6 +139,12 @@ function newChat() {
 	if (sending.value) return;
 	sessionName.value = null;
 	runName.value = null;
+	// A reopened older chat may have used another agent/model; new chats return to the default.
+	const preset = agents.value.find((x) => x.name === frappe.boot.flow_default_agent);
+	if (preset) {
+		selectedAgent.value = preset.name;
+		selectedModel.value = null;
+	}
 	messages.value = [];
 	attachments.value = [];
 	focusTick.value++;

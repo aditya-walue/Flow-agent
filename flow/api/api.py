@@ -193,6 +193,16 @@ def submit_browser_reply(
 
 
 @frappe.whitelist()
+def laya_metrics(days: int | str = 7) -> dict[str, Any]:
+	"""Laya routing over the last `days`: routed / fallback / error counts, fallback rate,
+	average confidence and latency, and routed count per intent. System Managers only."""
+	frappe.only_for("System Manager")
+	from flow.lib.laya_router import metrics
+
+	return metrics(int(days))
+
+
+@frappe.whitelist()
 def attach_file(file: str) -> dict[str, Any]:
 	"""Validate and extract an uploaded File for use as a chat attachment. Errors
 	(unsupported type, unreadable, not owned) surface here, at upload time. The
