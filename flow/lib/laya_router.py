@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -176,7 +177,9 @@ def _decide(text: str, decision: RouteDecision, available: set[str]) -> None:
 	elif intent == "SMALL_TALK":
 		tool, arguments = "small_talk", {"kind": "greeting"}
 	elif intent == "HOWTO":
-		doctype = _find_doctype_in_text(text)
+		# HOWTO covers any "how do I ..." but creation_steps only answers how to create a record,
+		# so route only when the message asks to create the DocType it names.
+		doctype = _creation_target(text)
 		tool, arguments = ("creation_steps", {"doctype": doctype}) if doctype else (None, None)
 	elif intent == "RECORD_LOOKUP" and (decision.asks_count or 0) >= threshold:
 		doctype = _find_doctype_in_text(text)
@@ -196,6 +199,41 @@ def _decide(text: str, decision: RouteDecision, available: set[str]) -> None:
 		return
 	decision.outcome, decision.tool, decision.arguments = "Routed", tool, arguments
 	decision.reason = f"{intent} at {decision.confidence:.2f}"
+
+
+CREATE_WORDS = {
+	"create", "creating", "add", "adding", "make", "making", "new", "register", "registering",
+	"enter", "entering", "raise", "raising", "record", "recording", "set", "setting",
+}
+FILLER_WORDS = {"a", "an", "the", "new", "one", "another", "up"}
+# "assign roles to employees", "link a contact to a customer": acting on records, not creating them.
+ASSIGN_WORDS = re.compile(
+	r"\b(assign|assigning|link|linking|attach|attaching|grant|granting|allocate|allocating|map|mapping|connect|connecting)\b",
+	re.IGNORECASE,
+)
+
+
+def _creation_target(text: str) -> str | None:
+	"""The DocType a how-to message asks to create ("guide me through adding a supplier" ->
+	Supplier), or None when it asks something else about it ("how to assign roles to employees",
+	"how do I add a role to an employee")."""
+	from flow.tools.builtins import _doctype_from_phrase
+
+	if ASSIGN_WORDS.search(text or ""):
+		return None
+	words = re.findall(r"[a-z][a-z\-]*", (text or "").lower())
+	for i, word in enumerate(words):
+		if word not in CREATE_WORDS or (word in ("set", "setting") and words[i + 1 : i + 2] != ["up"]):
+			continue
+		start = i + 1
+		while start < len(words) and words[start] in FILLER_WORDS:
+			start += 1
+		for size in range(min(4, len(words) - start), 0, -1):
+			doctype = _doctype_from_phrase(" ".join(words[start : start + size]))
+			if doctype:
+				# "add a role to an employee" adds to another record rather than creating one.
+				return None if words[start + size : start + size + 1] in (["to"], ["into"]) else doctype
+	return None
 
 
 def _number(answer: dict[str, Any] | None, key: str) -> float | None:

@@ -330,8 +330,9 @@ def required_values(doctype: DocTypeArg) -> dict[str, Any]:
 @tool(final_answer=True, route=lambda text: _route_creation_steps(text))
 def creation_steps(doctype: DocTypeArg) -> dict[str, Any]:
 	"""Step-by-step guide for creating a record of a DocType by hand in the desk, built from
-	this site's real required fields. Use for "how do I create/add X" questions. The guide is
-	shown to the user directly. Does not create anything.
+	this site's real required fields. Use only for "how do I create/add X" questions, not for
+	other tasks such as assigning, linking or approving. The guide is shown to the user directly.
+	Does not create anything.
 	"""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")

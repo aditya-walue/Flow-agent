@@ -73,6 +73,20 @@ class TestLayaRouter(IntegrationTestCase):
 	def test_howto_and_count_need_a_doctype(self):
 		self.assertEqual(self._route(_laya("HOWTO", 0.9), "guide me through adding a todo"), ("creation_steps", {"doctype": "ToDo"}))
 		self.assertIsNone(self._route(_laya("HOWTO", 0.9), "guide me through life"))
+
+	def test_howto_routes_only_requests_to_create(self):
+		self.assertEqual(self._route(_laya("HOWTO", 0.9), "walk me through setting up a new todo"), ("creation_steps", {"doctype": "ToDo"}))
+		self.assertEqual(self._route(_laya("HOWTO", 0.9), "what are the steps for making a note?"), ("creation_steps", {"doctype": "Note"}))
+		# How-to questions about doing something else with a DocType go to the chat model.
+		for text in (
+			"how to assign roles to employees?",
+			"how do I add a role to a user",
+			"how do I link a contact with an address",
+			"how do I cancel a todo",
+			"how to approve a leave application",
+		):
+			self.assertIsNone(self._route(_laya("HOWTO", 0.92), text), text)
+			self.assertIn("no direct Flow path", self._last_log().reason)
 		self.assertEqual(
 			self._route(_laya("RECORD_LOOKUP", 0.9, asks_count=0.95), "number of todos we have"),
 			("count", {"doctype": "ToDo"}),
