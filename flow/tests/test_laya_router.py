@@ -130,3 +130,18 @@ class TestLayaRouter(IntegrationTestCase):
 		self.assertEqual(result[0], "error_diagnosis")
 		self.assertEqual(agent.system_one.call_args[0][1], laya_router.FINETUNED_QUESTIONS)
 
+	def test_onnx_checkpoint_uses_flows_runner(self):
+		import tempfile
+
+		from flow.lib.laya_onnx import ONNX_FILE
+
+		with tempfile.TemporaryDirectory() as folder:
+			self.assertFalse(laya_router._use_onnx(folder))
+			open(f"{folder}/{ONNX_FILE}", "w").close()
+			self.assertTrue(laya_router._use_onnx(folder))
+			frappe.conf.flow_laya_backend = "laya"
+			try:
+				self.assertFalse(laya_router._use_onnx(folder))
+			finally:
+				frappe.conf.flow_laya_backend = None
+

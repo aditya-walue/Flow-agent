@@ -138,6 +138,28 @@ bench --site site-name set-config flow_laya_threshold 0.8 --parse   # optional, 
 
 The first message after each server start loads the model (about 10 s); later ones take about 150 ms. Every decision is recorded in `Flow Route Log`, and `flow.api.laya_metrics` summarises routed, fallback and error rates. If the package is missing or fails, Flow falls back to the chat model.
 
+#### Fine-tuned checkpoint without PyTorch (Frappe Cloud)
+
+A Laya checkpoint fine-tuned on Flow (`scripts/laya/`) can be exported to ONNX and run by Flow's own runner (`flow/lib/laya_onnx.py`), which needs only packages Flow already installs (onnxruntime, tokenizers, numpy, huggingface_hub). No `laya` extra, no PyTorch, so it works on hosts where you can't install extra packages, such as Frappe Cloud.
+
+```bash
+# on a machine with the laya extra installed
+./env/bin/pip install "laya[onnx]==0.3.27"
+python <laya repo>/scripts/export_onnx.py --model <checkpoint> --output <out>/laya.onnx
+cp -R <checkpoint>/rl_agent_config.json <checkpoint>/tokenizer <out>/
+python apps/flow/scripts/laya/check_onnx_parity.py --torch-model <checkpoint> --onnx-model <out> --data <dataset>
+```
+
+Then point the site at the folder, or at a Hugging Face repo holding the same files (`laya.onnx`, `laya.onnx.data`, `rl_agent_config.json`, `tokenizer/`):
+
+```bash
+bench --site site-name set-config flow_laya_model_path <folder or org/repo>
+bench --site site-name set-config flow_laya_threshold 0.85 --parse
+bench --site site-name set-config flow_laya_enabled 1 --parse
+```
+
+A private repo needs a read token in the `HF_TOKEN` environment variable. On Frappe Cloud, set these keys in the site's config and `HF_TOKEN` in the bench group's environment variables. Each web worker keeps its own copy of the model in memory (about 1.7 GB for the fp32 export), so this suits a dedicated server; on a small plan leave Laya off. `flow_laya_backend` (`onnx` or `laya`) forces the runtime when needed.
+
 ## License
 
 [GNU AGPLv3](license.txt)

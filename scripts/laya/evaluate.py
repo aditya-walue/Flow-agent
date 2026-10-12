@@ -8,8 +8,8 @@ split: accuracy, confusion matrix, per-intent precision/recall, asks-count accur
 calibration of the gating confidence (`answer_confidence`): expected calibration error (ECE), a
 reliability table, and accuracy vs. coverage at each candidate threshold.
 
-    ./env/bin/python apps/flow/scripts/laya/evaluate.py --model laya-flow/model \\
-        --data laya-flow/data --splits val test real_test --out laya-flow/reports/finetuned.json
+    ./env/bin/python apps/flow/scripts/laya/evaluate.py --model apps/flow/laya_data/model \\
+        --data apps/flow/laya_data/data --splits val test real_test --out apps/flow/laya_data/reports/finetuned.json
 """
 
 from __future__ import annotations

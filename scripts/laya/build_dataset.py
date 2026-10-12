@@ -15,7 +15,7 @@ Output, one JSON object per line ({"text", "intent", "asks_count", "source"}):
                                           across the three splits, so val/test measure
                                           generalisation, not memorisation
     real_test.jsonl                       Flow's real user messages, labelled by hand in a JSON file
-                                          kept outside the repo (--real-labels); never trained on
+                                          kept out of git in laya_data/ (--real-labels); never trained on
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ VALUES = ["Paid", "Open", "Draft", "Closed", "High", "Active", "Pending", "Overd
 
 def build(out_dir: str, real_labels: str | None = None) -> dict:
 	"""Write the splits to `out_dir`. `real_labels` is a JSON file of hand-labelled real messages
-	([{"text", "intent", "asks_count"}], kept outside the repo); they become real_test.jsonl."""
+	([{"text", "intent", "asks_count"}], kept out of git in laya_data/); they become real_test.jsonl."""
 	rng = random.Random(SEED)
 	out = Path(out_dir)
 	out.mkdir(parents=True, exist_ok=True)

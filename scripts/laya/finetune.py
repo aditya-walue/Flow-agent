@@ -9,7 +9,7 @@ source is replaced, with the dataset from build_dataset.py, asked exactly the qu
 at runtime (flow.lib.laya_router.FINETUNED_QUESTIONS).
 
     ./env/bin/python apps/flow/scripts/laya/finetune.py \\
-        --data laya-flow/data --output-dir laya-flow/model --epochs 3
+        --data apps/flow/laya_data/data --output-dir apps/flow/laya_data/model --epochs 3
 """
 
 from __future__ import annotations

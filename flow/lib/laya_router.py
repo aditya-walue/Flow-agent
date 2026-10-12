@@ -19,8 +19,12 @@ Flow behaves as if it were disabled. Site config (site_config.json):
     flow_laya_enabled    true to turn it on (default false)
     flow_laya_threshold  calibrated confidence needed to route directly (default 0.8)
     flow_laya_model      Laya checkpoint name, e.g. "english" (default: Laya's own routing)
-    flow_laya_model_path local checkpoint fine-tuned on Flow (scripts/laya/finetune.py); when set,
-                         it is asked FINETUNED_QUESTIONS, the questions it was trained on
+    flow_laya_model_path checkpoint fine-tuned on Flow (scripts/laya/finetune.py): a local folder or
+                         a Hugging Face repo id; asked FINETUNED_QUESTIONS, the questions it was
+                         trained on. A checkpoint containing laya.onnx runs on Flow's own ONNX
+                         runner (flow/lib/laya_onnx.py) — no PyTorch or `laya` package needed
+    flow_laya_backend    "onnx" or "laya" to force the runtime for flow_laya_model_path (default:
+                         ONNX when the checkpoint has laya.onnx)
 
 Every decision is logged as a Flow Route Log row (see `metrics` for the summary).
 """
@@ -28,6 +32,7 @@ Every decision is logged as a Flow Route Log row (see `metrics` for the summary)
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -217,14 +222,36 @@ _finetuned_agents: dict[str, Any] = {}
 
 
 def _finetuned_agent(path: str) -> Any:
-	"""The Flow fine-tuned checkpoint at `path`, loaded once per worker."""
+	"""The Flow fine-tuned checkpoint at `path`, loaded once per worker: on Flow's ONNX runner
+	when it ships laya.onnx (or flow_laya_backend says so), else with the `laya` package."""
 	if path not in _finetuned_agents:
 		with _router_lock:
 			if path not in _finetuned_agents:
-				import laya  # optional dependency
+				if _use_onnx(path):
+					from flow.lib.laya_onnx import OnnxLaya
 
-				_finetuned_agents[path] = laya.load(path)
+					_finetuned_agents[path] = OnnxLaya(path)
+				else:
+					import laya  # optional dependency (pulls in PyTorch)
+
+					_finetuned_agents[path] = laya.load(path)
 	return _finetuned_agents[path]
+
+
+def _use_onnx(path: str) -> bool:
+	from flow.lib.laya_onnx import ONNX_FILE, is_onnx_checkpoint
+
+	backend = (frappe.conf.get("flow_laya_backend") or "").lower()
+	if backend in ("onnx", "laya"):
+		return backend == "onnx"
+	if os.path.isdir(path):
+		return is_onnx_checkpoint(path)
+	try:  # a Hugging Face repo id: look for the exported graph among its files
+		from huggingface_hub import HfApi
+
+		return ONNX_FILE in HfApi().list_repo_files(path, token=os.environ.get("HF_TOKEN") or None)
+	except Exception:
+		return False
 
 
 def _log(text: str, decision: RouteDecision) -> None:

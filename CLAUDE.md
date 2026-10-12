@@ -32,7 +32,7 @@ Write tools (`create`, `update`) always go: prechecks → approval card → save
 | Browser-model bridge, tool-call parsing, strict JSON | `flow/lib/webllm.py`, `frontend/src/lib/webllm.js` |
 | Default model + "Flow Lite" agent (synced on install/migrate) | `flow/assistant/default.py` |
 | Laya router, logging, metrics | `flow/lib/laya_router.py`, `flow/flow/doctype/flow_route_log/` |
-| Laya dataset / fine-tune / eval | `scripts/laya/` (data and checkpoints live outside the repo) |
+| Laya dataset / fine-tune / eval | `scripts/laya/` (data, checkpoints, ONNX export and reports in `laya_data/`, gitignored) |
 | Panel (Vue) | `frontend/src/` → built into `flow/public/flow_panel/` |
 
 ## Commands
@@ -44,7 +44,7 @@ bench --site meeting.local migrate          # also re-syncs builtin tools and th
 cd apps/flow && yarn build                   # rebuild the panel after any frontend/src change
 ```
 
-Test modules: `test_ai_agent test_ai_builtins test_answers test_laya_router test_default_assistant
+Test modules: `test_ai_agent test_ai_builtins test_answers test_laya_router test_laya_onnx test_default_assistant
 test_ai_api test_create_coverage test_diagnosis test_webllm test_ai_tool test_ai_resolver
 test_ai_assistant test_session test_ai_triggers test_ai_model test_knowledge test_safe_exec test_conditions`.
 
@@ -59,15 +59,18 @@ test_ai_assistant test_session test_ai_triggers test_ai_model test_knowledge tes
 - **Laya is optional** (`pip install -e "apps/flow[laya]"`, pulls PyTorch). Code must keep working
   when `import laya` fails. Use the extra, not a bare `pip install laya`: the extra resolves
   transformers/tokenizers to versions litellm also accepts.
+- **Fine-tuned checkpoints with `laya.onnx` run on `flow/lib/laya_onnx.py`**, no PyTorch. It mirrors
+  laya/common.py's sequence format exactly; after changing it, rerun
+  `scripts/laya/check_onnx_parity.py` (token-level and output-level parity with Laya).
 - **Frappe loggers drop INFO by default**; `flow.laya` sets its own level explicitly.
-- **Site config switches**: `flow_laya_enabled`, `flow_laya_threshold`, `flow_laya_model_path`,
+- **Site config switches**: `flow_laya_enabled`, `flow_laya_threshold`, `flow_laya_model_path`, `flow_laya_backend`,
   `flow_webllm_strict_json` (default on), `flow_webllm_compact_context` (default on).
 
 ## Rules for changes
 
 - **Never put site data in code or tests** (record IDs, customer/item/employee names, company,
   emails). Use placeholders in docs/prompts and neutral values in tests; real labelled messages for
-  Laya stay outside the repo.
+  Laya stay out of git (`laya_data/` is gitignored).
 - **Answers come from live data.** Final-answer tools build their text from metadata and records at
   run time; routes only decide *which* tool runs.
 - **Don't weaken write safety.** Permissions, prechecks (made-up values, required fields, unknown
