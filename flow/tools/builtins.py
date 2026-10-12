@@ -1601,7 +1601,7 @@ def run_action(
 	return result
 
 
-from flow.tools.answers import document_flow, explain_doctype, show_records  # noqa: E402
+from flow.tools.answers import assignment_steps, document_flow, explain_doctype, show_records  # noqa: E402
 from flow.tools.diagnosis import error_diagnosis  # noqa: E402
 
 BUILTIN_TOOLS: list[Tool] = [
@@ -1614,6 +1614,7 @@ BUILTIN_TOOLS: list[Tool] = [
 	show_records,
 	explain_doctype,
 	document_flow,
+	assignment_steps,
 	read,
 	count,
 	search_knowledge,

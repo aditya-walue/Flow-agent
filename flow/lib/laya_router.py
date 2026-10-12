@@ -180,7 +180,13 @@ def _decide(text: str, decision: RouteDecision, available: set[str]) -> None:
 		# HOWTO covers any "how do I ..." but creation_steps only answers how to create a record,
 		# so route only when the message asks to create the DocType it names.
 		doctype = _creation_target(text)
-		tool, arguments = ("creation_steps", {"doctype": doctype}) if doctype else (None, None)
+		if doctype:
+			tool, arguments = "creation_steps", {"doctype": doctype}
+		else:
+			from flow.tools.answers import loose_assignment
+
+			arguments = loose_assignment(text)
+			tool = "assignment_steps" if arguments else None
 	elif intent == "RECORD_LOOKUP" and (decision.asks_count or 0) >= threshold:
 		doctype = _find_doctype_in_text(text)
 		tool, arguments = ("count", {"doctype": doctype}) if doctype else (None, None)

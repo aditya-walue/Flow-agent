@@ -9,6 +9,8 @@ them without the chat model:
 - explain_doctype "what is a <doctype>?" — module, purpose, lifecycle, main fields, links
 - document_flow   "what happens after a <doctype> is submitted?" — lifecycle, workflow, and the
                   documents ERPNext connects before and after it
+- assignment_steps "how do I assign <doctype> to <doctype>?" — where one record type is attached
+                  to another (a field, a table, or through a linked record), from the metadata
 
 Every answer is built from the live metadata and records the user may read; a route only fires
 when it recognises a real DocType or record, otherwise the message goes on to Laya / the model.
@@ -328,3 +330,207 @@ def _connections(meta: Any) -> dict[str, list[str]]:
 		items = [i for i in group.get("items") or [] if frappe.db.exists("DocType", i)]
 		(before if (group.get("label") or "").lower() == "reference" else after).extend(items)
 	return {"before": list(dict.fromkeys(before)), "after": list(dict.fromkeys(after))}
+
+
+# ── assignment_steps ───────────────────────────────────────────────────────────────────────
+
+# "how do I assign roles to employees", "how to link a contact with a customer",
+# "steps to give a role to a user": acting on existing records rather than creating one.
+ASSIGN_QUESTION = re.compile(
+	r"^\s*(?:how\s+(?:do|can|should)\s+(?:i|we|you)|how\s+to|steps\s+(?:to|for)|what\s+are\s+the\s+steps\s+(?:to|for))\s+"
+	r"(?:assign|link|attach|add|give|grant|allocate|map|connect|set)\s+(?P<item>[a-z][a-z \-]*?)\s+"
+	r"(?:to|for|with|on|against)\s+(?P<target>[a-z][a-z \-]*?)\s*[?.!]*\s*$",
+	re.IGNORECASE,
+)
+LINK_TYPES = ("Link", "Table", "Table MultiSelect")
+
+
+def _route_assignment_steps(text: str) -> dict[str, Any] | None:
+	match = ASSIGN_QUESTION.match(text or "")
+	return match and assignment_arguments(match.group("item"), match.group("target"))
+
+
+# Laya: an assign/link/attach verb, then "<item> to|with|for|on <target>" anywhere in the message
+# ("can you tell me the way to attach a holiday list for employees").
+LOOSE_ASSIGNMENT = re.compile(
+	r"\b(?:assign|assigning|link|linking|attach|attaching|give|giving|grant|granting|allocate|allocating|map|mapping|connect|connecting|add|adding)\s+"
+	r"(?P<item>[a-z][a-z \-]*?)\s+(?:to|for|with|on|against)\s+(?P<target>[a-z][a-z \-]*)",
+	re.IGNORECASE,
+)
+
+
+def assignment_arguments(item_phrase: str, target_phrase: str) -> dict[str, Any] | None:
+	"""{"item", "target"} when both phrases name DocTypes the metadata can connect, else None."""
+	find = _builtins()._find_doctype_in_text
+	item = find(item_phrase) or _assignment_doctype_for(item_phrase)
+	target = find(target_phrase)
+	if not item or not target or item == target or not _assignment_paths(item, target):
+		return None
+	return {"item": item, "target": target}
+
+
+def loose_assignment(text: str) -> dict[str, Any] | None:
+	match = LOOSE_ASSIGNMENT.search(text or "")
+	return match and assignment_arguments(match.group("item"), match.group("target"))
+
+
+@tool(final_answer=True, route=_route_assignment_steps)
+def assignment_steps(
+	item: Annotated[str, 'DocType being assigned or linked, e.g. "Role" in "assign roles to employees".'],
+	target: Annotated[str, 'DocType it is assigned to, e.g. "Employee".'],
+) -> dict[str, Any]:
+	"""Steps to assign, link or attach one kind of record to another ("how do I assign roles to
+	employees?"), found from the site's metadata: a field or table on the target, a field on the
+	item pointing back, or a record the target links to. Shown to the user directly. Changes nothing."""
+	for doctype in (item, target):
+		if not frappe.has_permission(doctype, "read"):
+			raise PermissionError(f"No permission to read {doctype}")
+	paths = _assignment_paths(item, target)
+	if not paths:
+		return {
+			"answer": f"This site has no field or table that links **{item}** to **{target}**, so they "
+			"aren't assigned to each other directly. Ask your administrator if a custom field is needed.",
+			"item": item,
+			"target": target,
+		}
+	return {"answer": _describe_path(item, target, paths[0]), "item": item, "target": target}
+
+
+ASSIGNMENT_SUFFIXES = ("Assignment", "Allocation")
+
+
+def _assignment_doctype_for(phrase: str) -> str | None:
+	"""An "<X> Assignment" / "<X> Allocation" DocType for a phrase that isn't a DocType itself
+	("shift" -> Shift Assignment)."""
+	words = " ".join(w.capitalize() for w in re.findall(r"[a-z]+", (phrase or "").lower()) if w not in ("a", "an", "the"))
+	names = _builtins()._doctype_names()
+	for suffix in ASSIGNMENT_SUFFIXES:
+		for name in (f"{words} {suffix}", f"{words.rstrip('s')} {suffix}"):
+			if name.lower() in names:
+				return names[name.lower()]
+	return None
+
+
+def _assignment_paths(item: str, target: str) -> list[list[tuple[str, Any]]]:
+	"""Ways to attach `item` to `target`, best first. Each path is a list of hops, every hop a
+	(doctype the user opens, field they fill): a dedicated assignment record ("Salary Structure
+	Assignment"), a field on the target, a field on the item pointing back at the target (a
+	Dynamic Link table included, like Contact's Links), or a record the target links to."""
+	if item.endswith(ASSIGNMENT_SUFFIXES) and _fields_to(item, target):
+		return [[(item, f)] for f in _fields_to(item, target) if f.fieldtype == "Link"][:1] or []
+	assignment = _assignment_record(item, target)
+	if assignment:
+		return [assignment]
+	candidates = [(2, [(target, f)]) for f in _fields_to(target, item)]
+	candidates += [(2, [(item, f)]) for f in _fields_to(item, target, dynamic=True) if f.fieldtype != "Link" or f.options == target]
+	for link in frappe.get_meta(target).fields:
+		if link.fieldtype != "Link" or not link.options or link.options in (item, target) or link.hidden:
+			continue
+		via = frappe.get_meta(link.options)
+		if via.istable or via.issingle:
+			continue
+		candidates += [(0, [(target, link), (link.options, f)]) for f in _fields_to(link.options, item)]
+	ranked = sorted(enumerate(candidates), key=lambda c: (-(c[1][0] + _fit(c[1][1][-1][1], item, target)), c[0]))
+	return [path for _, (_, path) in ranked]
+
+
+def _fit(field: Any, item: str, target: str) -> int:
+	"""How plainly a field is "the place" for the assignment: named after the record type it
+	holds ("roles" for Role, "department" for Department) rather than one special use of it
+	("exception_budget_approver_role"), and a table, which can hold several."""
+	held = field.options if field.fieldtype == "Link" else None
+	names = {_snake(item), _snake(item) + "s", _snake(target), _snake(target) + "s"}
+	score = 3 if field.fieldname in names or (held and field.fieldname == _snake(held)) else 0
+	return score + (2 if field.fieldtype != "Link" else 0)
+
+
+def _snake(doctype: str) -> str:
+	return doctype.lower().replace(" ", "_")
+
+
+def _assignment_record(item: str, target: str) -> list[tuple[str, Any]] | None:
+	"""A "<item> Assignment" / "<item> Allocation" DocType that links to both: the way the apps
+	mean the assignment to be made (it often carries dates and amounts the target can't)."""
+	names = _builtins()._doctype_names()
+	for suffix in ASSIGNMENT_SUFFIXES:
+		doctype = names.get(f"{item} {suffix}".lower())
+		if doctype and _fields_to(doctype, item) and _fields_to(doctype, target):
+			return [(doctype, _fields_to(doctype, target)[0])]
+	return None
+
+
+def _fields_to(doctype: str, other: str, dynamic: bool = False) -> list[Any]:
+	"""Fields of `doctype` that hold `other`: a visible Link to it, or a table whose rows link to
+	it (with `dynamic`, also rows with a Dynamic Link, which can point at any DocType). Tables count
+	even when hidden: some (User's roles) are edited through a custom widget."""
+	found = []
+	for f in frappe.get_meta(doctype).fields:
+		if f.fieldtype not in LINK_TYPES or not f.options:
+			continue
+		if f.fieldtype == "Link":
+			if f.options == other and not f.hidden:
+				found.append(f)
+			continue
+		rows = frappe.get_meta(f.options).fields
+		if any(c.fieldtype == "Link" and c.options == other for c in rows) or (
+			dynamic and any(c.fieldtype == "Dynamic Link" for c in rows)
+		):
+			found.append(f)
+	return found
+
+
+def _describe_path(item: str, target: str, path: list[tuple[str, Any]]) -> str:
+	steps = []
+	if len(path) == 2:
+		(_, link), (via, field) = path
+		steps.append(
+			f"{item} isn't set on the {target} itself: it's set on the **{via}** the {target} links to."
+		)
+		steps.append(
+			f"1. Open the {target} ([list](/desk/{_route(target)})) and check **{link.label}**: that's its {via}. "
+			f"If it's empty, pick or create the {via} there and save."
+		)
+		steps.append(f"2. Open that {via} and {_where(via, field)}{_fill(field, item)}.")
+		steps.append(f"3. Save the {via}.")
+	elif path[0][0] != target and path[0][0].endswith(ASSIGNMENT_SUFFIXES):
+		((doctype, field),) = path
+		if doctype != item:
+			steps.append(f"Create a **{doctype}** record: it assigns the {item} to the {target}.")
+		else:
+			steps.append(f"Create a **{doctype}** record for the {target}.")
+		steps.append(f"1. Open [New {doctype}](/desk/{_route(doctype)}/new).")
+		chosen = f" and the {item}" if doctype != item else ""
+		steps.append(f"2. Pick the {target} in **{field.label}**{chosen}, and fill in the other required fields.")
+		steps.append(f"3. Save{' and Submit' if frappe.get_meta(doctype).is_submittable else ''} it.")
+	else:
+		((doctype, field),) = path
+		other = target if doctype == item else item
+		steps.append(f"1. Open the {doctype} ([list](/desk/{_route(doctype)})).")
+		action = _where(doctype, field) + _fill(field, other)
+		steps.append(f"2. {action[0].upper()}{action[1:]}.")
+		steps.append(f"3. Save the {doctype}.")
+	return "\n\n".join(steps)
+
+
+def _fill(field: Any, other: str) -> str:
+	if field.fieldtype == "Link":
+		return f"set **{field.label}** to the {other}"
+	if any(c.fieldtype == "Dynamic Link" for c in frappe.get_meta(field.options).fields):
+		return f"add a row in the **{field.label}** table with {other} and the {other}'s name"
+	return f"add the {other} in the **{field.label}** table"
+
+
+def _where(doctype: str, field: Any) -> str:
+	"""'in the <section> section, ' for the section holding `field`, when it has a label."""
+	section = None
+	for f in frappe.get_meta(doctype).fields:
+		if f.fieldtype in ("Section Break", "Tab Break") and f.label:
+			section = f.label
+		if f.fieldname == field.fieldname:
+			break
+	return f"in the **{section}** section, " if section else ""
+
+
+def _route(doctype: str) -> str:
+	return doctype.lower().replace(" ", "-")
+

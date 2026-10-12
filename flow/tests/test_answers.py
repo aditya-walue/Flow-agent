@@ -79,3 +79,32 @@ class TestAnswerRoutes(IntegrationTestCase):
 		tidy = _tidy_filters("ToDo", {"date": ["<", "today()"]})
 		self.assertEqual(tidy["date"], ["<", frappe.utils.today()])
 
+
+
+class TestAssignmentSteps(IntegrationTestCase):
+	"""assignment_steps reads where one DocType is attached to another from the metadata."""
+
+	def _answer(self, text):
+		from flow.tools.answers import _route_assignment_steps, assignment_steps
+
+		args = _route_assignment_steps(text)
+		return args, (assignment_steps.func(**args)["answer"] if args else None)
+
+	def test_roles_go_on_the_users_table(self):
+		args, answer = self._answer("how do I add a role to a user")
+		self.assertEqual(args, {"item": "Role", "target": "User"})
+		self.assertIn("**Roles Assigned** table", answer)
+
+	def test_a_field_on_the_item_pointing_back(self):
+		args, answer = self._answer("how to assign a todo to a role?")
+		self.assertEqual(args, {"item": "ToDo", "target": "Role"})
+		self.assertIn("Open the ToDo", answer)
+
+	def test_dynamic_link_table(self):
+		args, answer = self._answer("how can I link a contact to a user")
+		self.assertIsNotNone(args)
+		self.assertIn("Open the Contact", answer)
+
+	def test_unrelated_or_unknown_doctypes_fall_through(self):
+		self.assertEqual(self._answer("how do I link my car to the moon")[0], None)
+		self.assertEqual(self._answer("how do I assign a note to a note")[0], None)
