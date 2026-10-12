@@ -145,3 +145,16 @@ class TestLayaRouter(IntegrationTestCase):
 			finally:
 				frappe.conf.flow_laya_backend = None
 
+	def test_hf_token_from_config_when_env_missing(self):
+		with patch.dict("os.environ", {}, clear=False):
+			import os
+
+			os.environ.pop("HF_TOKEN", None)
+			frappe.conf.flow_hf_token = "test-token"
+			try:
+				self.assertEqual(laya_router._hf_token(), "test-token")
+				os.environ["HF_TOKEN"] = "env-token"
+				self.assertEqual(laya_router._hf_token(), "env-token")
+			finally:
+				frappe.conf.flow_hf_token = None
+

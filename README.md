@@ -158,7 +158,7 @@ bench --site site-name set-config flow_laya_threshold 0.85 --parse
 bench --site site-name set-config flow_laya_enabled 1 --parse
 ```
 
-A private repo needs a read token in the `HF_TOKEN` environment variable. On Frappe Cloud, set these keys in the site's config and `HF_TOKEN` in the bench group's environment variables. Each web worker keeps its own copy of the model in memory (about 1.7 GB for the fp32 export), so this suits a dedicated server; on a small plan leave Laya off. `flow_laya_backend` (`onnx` or `laya`) forces the runtime when needed.
+A private repo needs a read token: the `HF_TOKEN` environment variable, or the `flow_hf_token` config key where environment variables can't be set. On Frappe Cloud, set the keys above in the site's config and `flow_hf_token` in the bench group's config (so site managers don't see it). Each web worker keeps its own copy of the model in memory (about 1.7 GB for the fp32 export), so this suits a dedicated server; on a small plan leave Laya off. `flow_laya_backend` (`onnx` or `laya`) forces the runtime when needed.
 
 ## License
 

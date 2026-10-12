@@ -63,7 +63,7 @@ test_ai_assistant test_session test_ai_triggers test_ai_model test_knowledge tes
   laya/common.py's sequence format exactly; after changing it, rerun
   `scripts/laya/check_onnx_parity.py` (token-level and output-level parity with Laya).
 - **Frappe loggers drop INFO by default**; `flow.laya` sets its own level explicitly.
-- **Site config switches**: `flow_laya_enabled`, `flow_laya_threshold`, `flow_laya_model_path`, `flow_laya_backend`,
+- **Site config switches**: `flow_laya_enabled`, `flow_laya_threshold`, `flow_laya_model_path`, `flow_laya_backend`, `flow_hf_token`,
   `flow_webllm_strict_json` (default on), `flow_webllm_compact_context` (default on).
 
 ## Rules for changes

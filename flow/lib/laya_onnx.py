@@ -46,11 +46,11 @@ def is_onnx_checkpoint(path: str) -> bool:
 class OnnxLaya:
 	"""`system_one(text, questions)` over an exported checkpoint, like laya's agents."""
 
-	def __init__(self, model_id_or_path: str):
+	def __init__(self, model_id_or_path: str, token: str | None = None):
 		import onnxruntime as ort
 
 		self.model_id = model_id_or_path
-		model_dir = _resolve(model_id_or_path)
+		model_dir = _resolve(model_id_or_path, token)
 		with open(os.path.join(model_dir, "rl_agent_config.json")) as f:
 			self.cfg = json.load(f)
 		self.tok = _Tokenizer(os.path.join(model_dir, "tokenizer"))
@@ -123,9 +123,9 @@ class OnnxLaya:
 # ── checkpoint files ───────────────────────────────────────────────────────────────────────
 
 
-def _resolve(model_id_or_path: str) -> str:
+def _resolve(model_id_or_path: str, token: str | None = None) -> str:
 	"""A local checkpoint directory, downloading a Hugging Face repo (only the files needed; a
-	private repo reads HF_TOKEN or the saved login) when given a repo id."""
+	private repo needs `token`, HF_TOKEN or the saved login) when given a repo id."""
 	if os.path.isdir(model_id_or_path):
 		return model_id_or_path
 	from huggingface_hub import snapshot_download
@@ -133,7 +133,7 @@ def _resolve(model_id_or_path: str) -> str:
 	return snapshot_download(
 		model_id_or_path,
 		allow_patterns=["rl_agent_config.json", "tokenizer/*", f"{ONNX_FILE}", f"{ONNX_FILE}.data"],
-		token=os.environ.get("HF_TOKEN") or None,
+		token=token or os.environ.get("HF_TOKEN") or None,
 	)
 
 

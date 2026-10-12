@@ -23,6 +23,8 @@ Flow behaves as if it were disabled. Site config (site_config.json):
                          a Hugging Face repo id; asked FINETUNED_QUESTIONS, the questions it was
                          trained on. A checkpoint containing laya.onnx runs on Flow's own ONNX
                          runner (flow/lib/laya_onnx.py) — no PyTorch or `laya` package needed
+    flow_hf_token        read token for a private Hugging Face checkpoint when the HF_TOKEN
+                         environment variable can't be set (e.g. Frappe Cloud bench config)
     flow_laya_backend    "onnx" or "laya" to force the runtime for flow_laya_model_path (default:
                          ONNX when the checkpoint has laya.onnx)
 
@@ -230,12 +232,18 @@ def _finetuned_agent(path: str) -> Any:
 				if _use_onnx(path):
 					from flow.lib.laya_onnx import OnnxLaya
 
-					_finetuned_agents[path] = OnnxLaya(path)
+					_finetuned_agents[path] = OnnxLaya(path, token=_hf_token())
 				else:
 					import laya  # optional dependency (pulls in PyTorch)
 
 					_finetuned_agents[path] = laya.load(path)
 	return _finetuned_agents[path]
+
+
+def _hf_token() -> str | None:
+	"""Read token for a private Hugging Face checkpoint: the HF_TOKEN environment variable, or the
+	flow_hf_token config key for hosts that only offer config, not environment variables (Frappe Cloud)."""
+	return os.environ.get("HF_TOKEN") or frappe.conf.get("flow_hf_token") or None
 
 
 def _use_onnx(path: str) -> bool:
@@ -249,7 +257,7 @@ def _use_onnx(path: str) -> bool:
 	try:  # a Hugging Face repo id: look for the exported graph among its files
 		from huggingface_hub import HfApi
 
-		return ONNX_FILE in HfApi().list_repo_files(path, token=os.environ.get("HF_TOKEN") or None)
+		return ONNX_FILE in HfApi().list_repo_files(path, token=_hf_token())
 	except Exception:
 		return False
 
