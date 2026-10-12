@@ -155,11 +155,7 @@ class TestLayaRouter(IntegrationTestCase):
 			self.assertFalse(laya_router._use_onnx(folder))
 			open(f"{folder}/{ONNX_FILE}", "w").close()
 			self.assertTrue(laya_router._use_onnx(folder))
-			frappe.conf.flow_laya_backend = "laya"
-			try:
-				self.assertFalse(laya_router._use_onnx(folder))
-			finally:
-				frappe.conf.flow_laya_backend = None
+			self.assertFalse(laya_router._use_onnx(folder, backend="laya"))
 
 	def test_hf_token_from_config_when_env_missing(self):
 		with patch.dict("os.environ", {}, clear=False):
@@ -173,4 +169,35 @@ class TestLayaRouter(IntegrationTestCase):
 				self.assertEqual(laya_router._hf_token(), "env-token")
 			finally:
 				frappe.conf.flow_hf_token = None
+
+	def test_model_loads_in_background_without_blocking(self):
+		import threading
+
+		release = threading.Event()
+
+		def slow_load():
+			release.wait(5)
+			return "model"
+
+		key = "test:background"
+		laya_router._models.pop(key, None)
+		laya_router._loading.pop(key, None)
+		try:
+			with self.assertRaises(laya_router.ModelLoading):
+				laya_router._model(key, slow_load)
+			release.set()
+			for _ in range(50):
+				if key in laya_router._models:
+					break
+				threading.Event().wait(0.05)
+			self.assertEqual(laya_router._model(key, slow_load), "model")
+		finally:
+			laya_router._models.pop(key, None)
+			laya_router._loading.pop(key, None)
+
+	def test_loading_model_falls_back_quietly(self):
+		with patch.object(laya_router, "_router", side_effect=laya_router.ModelLoading("still loading")):
+			self.assertIsNone(laya_router.route("my invoice won't submit", TOOLS))
+		log = self._last_log()
+		self.assertEqual((log.outcome, log.reason), ("Fallback", "still loading"))
 

@@ -131,6 +131,8 @@ def route(text: str, available_tools: set[str]) -> tuple[str, dict[str, Any]] | 
 	try:
 		_classify(text, decision)
 		_decide(text, decision, available_tools)
+	except ModelLoading as e:
+		decision.reason = str(e)
 	except Exception as e:
 		decision.outcome, decision.error = "Error", f"{type(e).__name__}: {e}"[:1000]
 		decision.reason = "Laya unavailable or failed; using the chat model"
@@ -248,40 +250,71 @@ def _number(answer: dict[str, Any] | None, key: str) -> float | None:
 	return float(answer[key])
 
 
-_router_instance = None
+# Models load in a background thread: the first download (1.6 GB for the fine-tuned export) and
+# load can take minutes, far past a web request's timeout, so a request never waits for one.
+# Until a model is ready, messages fall back to the chat model.
+LOAD_RETRY_SECONDS = 300
+_models: dict[str, Any] = {}
+_loading: dict[str, dict[str, Any]] = {}
 _router_lock = threading.Lock()
+
+
+class ModelLoading(Exception):
+	"""The Laya model isn't loaded yet; this message goes to the chat model."""
 
 
 def _router() -> Any:
 	"""Laya's Router, loaded once per worker (it downloads a checkpoint on first use)."""
-	global _router_instance
-	if _router_instance is None:
-		with _router_lock:
-			if _router_instance is None:
-				from laya import Router  # optional dependency: ImportError means "unavailable"
 
-				_router_instance = Router()
-	return _router_instance
+	def load():
+		from laya import Router  # optional dependency: ImportError means "unavailable"
 
+		return Router()
 
-_finetuned_agents: dict[str, Any] = {}
+	return _model("router", load)
 
 
 def _finetuned_agent(path: str) -> Any:
 	"""The Flow fine-tuned checkpoint at `path`, loaded once per worker: on Flow's ONNX runner
 	when it ships laya.onnx (or flow_laya_backend says so), else with the `laya` package."""
-	if path not in _finetuned_agents:
-		with _router_lock:
-			if path not in _finetuned_agents:
-				if _use_onnx(path):
-					from flow.lib.laya_onnx import OnnxLaya
+	# Site config is read here, in the request: the loading thread has no Frappe context.
+	backend, token = (frappe.conf.get("flow_laya_backend") or "").lower(), _hf_token()
 
-					_finetuned_agents[path] = OnnxLaya(path, token=_hf_token())
-				else:
-					import laya  # optional dependency (pulls in PyTorch)
+	def load():
+		if _use_onnx(path, backend, token):
+			from flow.lib.laya_onnx import OnnxLaya
 
-					_finetuned_agents[path] = laya.load(path)
-	return _finetuned_agents[path]
+			return OnnxLaya(path, token=token)
+		import laya  # optional dependency (pulls in PyTorch)
+
+		return laya.load(path)
+
+	return _model(f"finetuned:{path}", load)
+
+
+def _model(key: str, load) -> Any:
+	"""The loaded model for `key`, or ModelLoading after starting (or while running) its load in
+	a background thread. A failed load is reported, then retried after LOAD_RETRY_SECONDS."""
+	if key in _models:
+		return _models[key]
+	with _router_lock:
+		state = _loading.get(key)
+		if state is None or (state["error"] and time.monotonic() - state["at"] > LOAD_RETRY_SECONDS):
+			state = _loading[key] = {"error": None, "at": time.monotonic()}
+
+			def run():
+				try:
+					_models[key] = load()
+				except Exception as e:
+					state["error"], state["at"] = f"{type(e).__name__}: {e}"[:900], time.monotonic()
+					logging.getLogger("flow.laya").warning("Laya model %s failed to load: %s", key, state["error"])
+
+			threading.Thread(target=run, name=f"flow-laya-load-{key}", daemon=True).start()
+	if key in _models:
+		return _models[key]
+	if state["error"]:
+		raise RuntimeError(f"Laya model failed to load: {state['error']}")
+	raise ModelLoading("Laya model is still loading in the background; the chat model answers meanwhile")
 
 
 def _hf_token() -> str | None:
@@ -290,10 +323,9 @@ def _hf_token() -> str | None:
 	return os.environ.get("HF_TOKEN") or frappe.conf.get("flow_hf_token") or None
 
 
-def _use_onnx(path: str) -> bool:
+def _use_onnx(path: str, backend: str = "", token: str | None = None) -> bool:
 	from flow.lib.laya_onnx import ONNX_FILE, is_onnx_checkpoint
 
-	backend = (frappe.conf.get("flow_laya_backend") or "").lower()
 	if backend in ("onnx", "laya"):
 		return backend == "onnx"
 	if os.path.isdir(path):
@@ -301,7 +333,7 @@ def _use_onnx(path: str) -> bool:
 	try:  # a Hugging Face repo id: look for the exported graph among its files
 		from huggingface_hub import HfApi
 
-		return ONNX_FILE in HfApi().list_repo_files(path, token=_hf_token())
+		return ONNX_FILE in HfApi().list_repo_files(path, token=token)
 	except Exception:
 		return False
 
