@@ -263,11 +263,13 @@ GREETING = re.compile(
 )
 THANKS = re.compile(r"^\s*(thanks?|thank\s+you|thx|ty|ok(ay)?|cool|great|nice|got\s+it)\b[\s!.,]*(so\s+much|a\s+lot|flow)?[\s!.]*$", re.IGNORECASE)
 CAPABILITIES = (
+	# Placeholders use [square brackets]: the panel renders Markdown and drops <angle> text as HTML.
 	"I can help with your data:\n"
-	"- **Count** records: *how many <records> are there?*\n"
-	"- **Show** details: *show the details of <record ID>*\n"
-	"- **Explain** how to create something: *how to create a <record type>?*\n"
-	"- **Create** records for you: *create a <record type> with <field> <value>, ...*\n"
+	"- **Count** records: *how many [records] are there?*\n"
+	"- **Show** details: *show the details of [record ID]*\n"
+	"- **Explain** how to create something: *how to create a [record type]?*\n"
+	"- **Explain** how to assign or link: *how to assign [record type] to [record type]?*\n"
+	"- **Create** records for you: *create a [record type] with [field] [value], ...*\n"
 	"- **Diagnose** an error: paste the error message"
 )
 
