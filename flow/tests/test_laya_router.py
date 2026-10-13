@@ -201,3 +201,12 @@ class TestLayaRouter(IntegrationTestCase):
 		log = self._last_log()
 		self.assertEqual((log.outcome, log.reason), ("Fallback", "still loading"))
 
+	def test_pytorch_models_load_in_the_request(self):
+		key = "test:foreground"
+		laya_router._models.pop(key, None)
+		try:
+			self.assertEqual(laya_router._model(key, lambda: "model", background=False), "model")
+			self.assertNotIn(key, laya_router._loading)
+		finally:
+			laya_router._models.pop(key, None)
+

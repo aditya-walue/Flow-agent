@@ -250,9 +250,11 @@ def _number(answer: dict[str, Any] | None, key: str) -> float | None:
 	return float(answer[key])
 
 
-# Models load in a background thread: the first download (1.6 GB for the fine-tuned export) and
-# load can take minutes, far past a web request's timeout, so a request never waits for one.
-# Until a model is ready, messages fall back to the chat model.
+# The ONNX model loads in a background thread: the first download (1.6 GB for the fine-tuned
+# export) and load can take minutes, far past a web request's timeout, so a request never waits
+# for it; until it is ready, messages fall back to the chat model. PyTorch models (the `laya`
+# package) load in the request instead, as before: loading PyTorch in a background thread while
+# the web server keeps serving requests intermittently crashed the whole process (SIGSEGV).
 LOAD_RETRY_SECONDS = 300
 _models: dict[str, Any] = {}
 _loading: dict[str, dict[str, Any]] = {}
@@ -271,7 +273,7 @@ def _router() -> Any:
 
 		return Router()
 
-	return _model("router", load)
+	return _model("router", load, background=False)
 
 
 def _finetuned_agent(path: str) -> Any:
@@ -279,9 +281,13 @@ def _finetuned_agent(path: str) -> Any:
 	when it ships laya.onnx (or flow_laya_backend says so), else with the `laya` package."""
 	# Site config is read here, in the request: the loading thread has no Frappe context.
 	backend, token = (frappe.conf.get("flow_laya_backend") or "").lower(), _hf_token()
+	key = f"finetuned:{path}"
+	if key not in _backends:
+		_backends[key] = _use_onnx(path, backend, token)
+	onnx = _backends[key]
 
 	def load():
-		if _use_onnx(path, backend, token):
+		if onnx:
 			from flow.lib.laya_onnx import OnnxLaya
 
 			return OnnxLaya(path, token=token)
@@ -289,13 +295,22 @@ def _finetuned_agent(path: str) -> Any:
 
 		return laya.load(path)
 
-	return _model(f"finetuned:{path}", load)
+	return _model(key, load, background=onnx)
 
 
-def _model(key: str, load) -> Any:
-	"""The loaded model for `key`, or ModelLoading after starting (or while running) its load in
-	a background thread. A failed load is reported, then retried after LOAD_RETRY_SECONDS."""
+_backends: dict[str, bool] = {}
+
+
+def _model(key: str, load, background: bool = True) -> Any:
+	"""The loaded model for `key`. In the background: ModelLoading after starting (or while
+	running) its load in a thread; a failed load is reported, then retried after
+	LOAD_RETRY_SECONDS. Otherwise loaded in this request, once per worker."""
 	if key in _models:
+		return _models[key]
+	if not background:
+		with _router_lock:
+			if key not in _models:
+				_models[key] = load()
 		return _models[key]
 	with _router_lock:
 		state = _loading.get(key)
