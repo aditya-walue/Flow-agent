@@ -11,6 +11,8 @@ them without the chat model:
                   documents ERPNext connects before and after it
 - assignment_steps "how do I assign <doctype> to <doctype>?" — where one record type is attached
                   to another (a field, a table, or through a linked record), from the metadata
+- status_steps    "how do I mark <doctype> as <status>?" — how a record reaches a status: the
+                  connected document that sets it (Paid -> Payment Entry), or submit / cancel
 
 Every answer is built from the live metadata and records the user may read; a route only fires
 when it recognises a real DocType or record, otherwise the message goes on to Laya / the model.
@@ -170,7 +172,7 @@ def show_records(
 
 	if not rows:
 		what = f"{doctype} {', '.join(names)}" if names else f"{doctype} records" + (" matching that" if filters else "")
-		return {"answer": f"No {what} found (or you don't have access to them)."}
+		return {"answer": f"No {what} found (or you don't have access to them).", "doctype": doctype}
 
 	if len(rows) == 1 and names:
 		row = rows[0]
@@ -533,4 +535,134 @@ def _where(doctype: str, field: Any) -> str:
 
 def _route(doctype: str) -> str:
 	return doctype.lower().replace(" ", "-")
+
+
+# ── status_steps ───────────────────────────────────────────────────────────────────────────
+
+# "how can I make this invoice as paid", "how do I mark a sales order as completed",
+# "how to set a task to closed", "how do I pay a purchase invoice"
+STATUS_QUESTION = re.compile(
+	r"^\s*(?:how\s+(?:do|can|should|would)\s+(?:i|we|you)|how\s+to|steps\s+(?:to|for))\s+"
+	r"(?:(?:make|mark|set|get|turn|change|move|update)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what>[a-z][a-z \-]*?)"
+	r"\s+(?:as|to|into|be)\s+(?:(?:a|an)\s+)?(?P<status>[a-z][a-z \-]*?)"
+	r"|(?P<verb>pay|close|cancel|submit|complete)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z \-]*?))"
+	r"\s*[?.!]*\s*$",
+	re.IGNORECASE,
+)
+# Verb -> the status it produces, and status word -> the stem of the documents that set it
+# (English word forms, not site data).
+VERB_STATUS = {"pay": "Paid", "close": "Closed", "cancel": "Cancelled", "submit": "Submitted", "complete": "Completed"}
+STATUS_STEMS = {"paid": "pay", "partly paid": "pay", "billed": "bill", "delivered": "deliver", "received": "receiv",
+	"returned": "return", "ordered": "order", "invoiced": "invoic", "transferred": "transfer"}
+
+
+def _route_status_steps(text: str) -> dict[str, Any] | None:
+	match = STATUS_QUESTION.match(text or "")
+	if not match:
+		return None
+	what = match.group("what") or match.group("what2")
+	status = match.group("status") or VERB_STATUS.get((match.group("verb") or "").lower())
+	return status_arguments(what, status)
+
+
+def status_arguments(what_phrase: str, status_phrase: str) -> dict[str, Any] | None:
+	"""{"doctype", "status"} when the phrase names a DocType that has that status, else None."""
+	doctype = _builtins()._find_doctype_in_text(what_phrase or "")
+	status = doctype and _status_option(doctype, status_phrase or "")
+	return {"doctype": doctype, "status": status} if status else None
+
+
+def _status_option(doctype: str, phrase: str) -> str | None:
+	"""The DocType's own status option a phrase means ("paid" -> "Paid"), or lifecycle words."""
+	field = frappe.get_meta(doctype).get_field("status")
+	options = [o for o in ((field.options or "").split("\n") if field else []) if o]
+	wanted = phrase.strip().lower()
+	for option in options:
+		if option.lower() == wanted:
+			return option
+	if frappe.get_meta(doctype).is_submittable and wanted in ("submitted", "cancelled", "canceled"):
+		return "Cancelled" if wanted.startswith("cancel") else "Submitted"
+	return None
+
+
+@tool(final_answer=True, route=_route_status_steps)
+def status_steps(
+	doctype: DocTypeArg,
+	status: Annotated[str, 'The status the user wants the record to reach, e.g. "Paid", "Completed".'],
+) -> dict[str, Any]:
+	"""How a record reaches a status ("how do I mark this invoice as paid?"): submit or cancel for
+	submittable records, otherwise the connected document that sets the status (Paid -> Payment
+	Entry), from the site's metadata. Shown to the user directly. Changes nothing."""
+	if not frappe.has_permission(doctype, "read"):
+		raise PermissionError(f"No permission to read {doctype}")
+	meta = frappe.get_meta(doctype)
+	option = _status_option(doctype, status) or status
+	route = _route(doctype)
+	if option in ("Submitted", "Cancelled") and meta.is_submittable:
+		verb = "Submit" if option == "Submitted" else "Cancel"
+		steps = [f"1. Open the {doctype} ([list](/desk/{route})).", f"2. Click **{verb}** and confirm."]
+		if verb == "Cancel":
+			steps.append("Only a submitted record can be cancelled; to change it afterwards use **Amend**.")
+		return {"answer": "\n\n".join(steps), "doctype": doctype, "status": option}
+
+	creator = _status_creator(meta, option)
+	status_field = meta.get_field("status")
+	automatic = bool(status_field and status_field.read_only)
+	if not creator:
+		hint = "It is set by the system from linked documents" if automatic else f"Set **Status** to **{option}** and save"
+		return {"answer": f"**{doctype}** has no connected document that sets **{option}**. {hint}.", "doctype": doctype, "status": option}
+
+	steps = [f"A {doctype} becomes **{option}** when a **{creator}** is made against it."]
+	n = 1
+	if meta.is_submittable:
+		steps.append(f"{n}. Open the {doctype} ([list](/desk/{route})); it must be **submitted** first (Submit if it is a Draft).")
+	else:
+		steps.append(f"{n}. Open the {doctype} ([list](/desk/{route})).")
+	n += 1
+	steps.append(f"{n}. Click **Create → {creator}**: it opens with the {doctype} already linked.")
+	n += 1
+	submit = " and **Submit**" if frappe.get_meta(creator).is_submittable else ""
+	steps.append(f"{n}. Check the amounts and dates, then **Save**{submit}.")
+	if automatic:
+		steps.append(f"The {doctype}'s status then changes to **{option}** on its own (the Status field can't be edited by hand).")
+	return {"answer": "\n\n".join(steps), "doctype": doctype, "status": option}
+
+
+def _status_creator(meta: Any, option: str) -> str | None:
+	"""The connected DocType whose record moves `meta` to `option`: from the dashboard group or
+	item named like the status's verb ("Paid" -> the "Payment" group -> Payment Entry)."""
+	stem = STATUS_STEMS.get(option.lower())
+	if not stem:
+		return None
+	try:
+		groups = meta.get_dashboard_data().get("transactions") or []
+	except Exception:
+		return None
+	for group in groups:
+		items = [i for i in group.get("items") or [] if frappe.db.exists("DocType", i)]
+		if (group.get("label") or "").lower().startswith(stem) and items:
+			return items[0]
+	for group in groups:
+		for item in group.get("items") or []:
+			if stem in item.lower() and frappe.db.exists("DocType", item):
+				return item
+	return None
+
+
+# Laya: "could you tell me the way to get this sales invoice marked as paid"
+LOOSE_STATUS = re.compile(
+	r"\b(?:make|mark|set|get|turn|change|move)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what>[a-z][a-z \-]*?)"
+	r"\s+(?:marked\s+)?(?:as|to|into)\s+(?P<status>[a-z]+(?:\s+[a-z]+)?)\b"
+	r"|\b(?P<verb>pay|close|cancel|submit)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z \-]*)",
+	re.IGNORECASE,
+)
+
+
+def loose_status(text: str) -> dict[str, Any] | None:
+	match = LOOSE_STATUS.search(text or "")
+	if not match:
+		return None
+	what = match.group("what") or match.group("what2")
+	status = match.group("status") or VERB_STATUS.get((match.group("verb") or "").lower())
+	return status_arguments(what, status)
 

@@ -108,3 +108,30 @@ class TestAssignmentSteps(IntegrationTestCase):
 	def test_unrelated_or_unknown_doctypes_fall_through(self):
 		self.assertEqual(self._answer("how do I link my car to the moon")[0], None)
 		self.assertEqual(self._answer("how do I assign a note to a note")[0], None)
+
+
+class TestStatusSteps(IntegrationTestCase):
+	"""status_steps explains how a record reaches a status, from its metadata."""
+
+	def _answer(self, text):
+		from flow.tools.answers import _route_status_steps, status_steps
+
+		args = _route_status_steps(text)
+		return args, (status_steps.func(**args)["answer"] if args else None)
+
+	def test_status_set_by_hand(self):
+		args, answer = self._answer("how do I mark a todo as closed?")
+		self.assertEqual(args, {"doctype": "ToDo", "status": "Closed"})
+		self.assertIn("Closed", answer)
+
+	def test_unknown_status_or_doctype_falls_through(self):
+		self.assertIsNone(self._answer("how do I mark a todo as purple")[0])
+		self.assertIsNone(self._answer("how do I mark my car as paid")[0])
+
+	def test_paid_comes_from_the_connected_payment_document(self):
+		if not frappe.db.exists("DocType", "Sales Invoice"):
+			self.skipTest("ERPNext not installed")
+		args, answer = self._answer("how can I make a sales invoice as paid?")
+		self.assertEqual(args, {"doctype": "Sales Invoice", "status": "Paid"})
+		self.assertIn("Payment Entry", answer)
+		self.assertIn("submitted", answer)

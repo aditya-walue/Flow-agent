@@ -185,10 +185,13 @@ def _decide(text: str, decision: RouteDecision, available: set[str]) -> None:
 		if doctype:
 			tool, arguments = "creation_steps", {"doctype": doctype}
 		else:
-			from flow.tools.answers import loose_assignment
+			from flow.tools.answers import loose_assignment, loose_status
 
 			arguments = loose_assignment(text)
 			tool = "assignment_steps" if arguments else None
+			if not arguments:
+				arguments = loose_status(text)
+				tool = "status_steps" if arguments else None
 	elif intent == "RECORD_LOOKUP" and (decision.asks_count or 0) >= threshold:
 		doctype = _find_doctype_in_text(text)
 		tool, arguments = ("count", {"doctype": doctype}) if doctype else (None, None)

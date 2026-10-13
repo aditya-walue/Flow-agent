@@ -10,7 +10,7 @@ and every tool run **on the server**, as the logged-in user.
 The loop picks who answers, first match wins:
 
 1. **Exact routes** — `Tool.route` regexes on the latest user message (greetings, "how many X",
-   "how to create X", "how to assign X to Y", "create X with …", "show/list X", "what is X", "what happens after X",
+   "how to create X", "how to assign X to Y", "how to mark X as paid", "create X with …", "show/list X", "what is X", "what happens after X",
    pasted errors). Run the tool directly; no model call. DocType names are typo-tolerant.
 2. **Laya** (optional) — `flow/lib/laya_router.py` classifies intent; at confidence ≥
    `flow_laya_threshold` (0.8) it may route to a **read-only** tool, else falls through.
@@ -27,7 +27,7 @@ Write tools (`create`, `update`) always go: prechecks → approval card → save
 | Agent loop, routing, prompt trimming | `flow/lib/agent.py` |
 | Tool framework (hooks: `precheck`, `route`, `redirect`, `final_answer`) | `flow/lib/tool.py`, `flow/lib/resolver.py` |
 | Builtin data tools, write prechecks, route patterns | `flow/tools/builtins.py` |
-| Final-answer tools (show_records, explain_doctype, document_flow, assignment_steps) | `flow/tools/answers.py` |
+| Final-answer tools (show_records, explain_doctype, document_flow, assignment_steps, status_steps) | `flow/tools/answers.py` |
 | Error diagnosis | `flow/tools/diagnosis.py` |
 | Browser-model bridge, tool-call parsing, strict JSON | `flow/lib/webllm.py`, `frontend/src/lib/webllm.js` |
 | Default model + "Flow Lite" agent (synced on install/migrate) | `flow/assistant/default.py` |

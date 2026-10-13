@@ -9,7 +9,7 @@ from frappe.tests import IntegrationTestCase
 
 from flow.lib import laya_router
 
-TOOLS = {"count", "creation_steps", "assignment_steps", "error_diagnosis", "small_talk", "required_values", "create", "update"}
+TOOLS = {"count", "creation_steps", "assignment_steps", "status_steps", "error_diagnosis", "small_talk", "required_values", "create", "update"}
 
 
 def _laya(intent, confidence, asks_count=0.0):
@@ -79,12 +79,15 @@ class TestLayaRouter(IntegrationTestCase):
 		self.assertEqual(self._route(_laya("HOWTO", 0.9), "what are the steps for making a note?"), ("creation_steps", {"doctype": "Note"}))
 		# How-to questions about doing something else with a DocType go to the chat model.
 		self.assertEqual(
+			self._route(_laya("HOWTO", 0.92), "could you tell me how to get this todo marked as closed"),
+			("status_steps", {"doctype": "ToDo", "status": "Closed"}),
+		)
+		self.assertEqual(
 			self._route(_laya("HOWTO", 0.92), "can you tell me the way to give a role to a user"),
 			("assignment_steps", {"item": "Role", "target": "User"}),
 		)
 		for text in (
 			"how do I link my car to the moon",
-			"how do I cancel a todo",
 			"how to approve a leave application",
 		):
 			self.assertIsNone(self._route(_laya("HOWTO", 0.92), text), text)

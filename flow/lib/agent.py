@@ -475,11 +475,12 @@ class Agent:
 		last = messages[-1] if messages else {}
 		if last.get("role") != "user" or not isinstance(last.get("content"), str):
 			return None
+		text = _with_referenced_doctype(last["content"], messages)
 		for tool in self.tools:
 			if not tool.route:
 				continue
 			try:
-				arguments = tool.route(last["content"])
+				arguments = tool.route(text)
 			except Exception:
 				arguments = None
 			if arguments:
@@ -488,7 +489,7 @@ class Agent:
 		# confident; it returns None (chat model as usual) when disabled, unsure or unavailable.
 		from flow.lib import laya_router
 
-		laya = laya_router.route(last["content"], set(self._tools_by_name))
+		laya = laya_router.route(text, set(self._tools_by_name))
 		return _routed_call(*laya) if laya else None
 
 	def _pending_calls(self, messages: list[dict[str, Any]]) -> list[ToolCall]:
@@ -697,3 +698,29 @@ def _serialize_tool_result(result: Any) -> str:
 def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:
 	for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
 		total[key] += int(delta.get(key, 0) or 0)
+
+
+# "this invoice", "that order": a record from an earlier answer, named by part of its DocType.
+REFERENCE = re.compile(r"\b(this|that|the same|these|those)\s+([a-z][a-z\-]*)\b", re.IGNORECASE)
+
+
+def _with_referenced_doctype(text: str, messages: list[dict[str, Any]]) -> str:
+	"""`text` with "this <word>" spelled out as the DocType of the latest tool result whose
+	DocType contains that word ("how can I make this invoice paid?" after a Sales Invoice was shown
+	-> "... this Sales Invoice paid?"), so routes and Laya can recognise it. The stored message is
+	unchanged."""
+	match = REFERENCE.search(text or "")
+	if not match:
+		return text
+	word = match.group(2).lower().rstrip("s")
+	for message in reversed(messages[:-1]):
+		if message.get("role") != "tool" or not isinstance(message.get("content"), str):
+			continue
+		try:
+			doctype = json.loads(message["content"]).get("doctype")
+		except (ValueError, AttributeError):
+			continue
+		if isinstance(doctype, str) and word in doctype.lower() and word != doctype.lower():
+			return text[: match.start(2)] + doctype + text[match.end(2) :]
+	return text
+

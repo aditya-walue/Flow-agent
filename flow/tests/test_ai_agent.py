@@ -832,3 +832,28 @@ class TestBrowserModelContext(UnitTestCase):
 		trimmed = _recent_turns(messages)
 		self.assertEqual(trimmed[0]["role"], "system")
 		self.assertEqual([m["content"] for m in trimmed if m["role"] == "user"], [f"q{i}" for i in range(5 - RECENT_USER_TURNS, 5)])
+
+
+class TestReferencedDocType(UnitTestCase):
+	""""this <word>" in a follow-up is read as the DocType of the record shown before."""
+
+	def _history(self, doctype):
+		import json
+
+		return [
+			{"role": "user", "content": "show my open todos"},
+			{"role": "tool", "tool_call_id": "c1", "content": json.dumps({"answer": "...", "doctype": doctype})},
+		]
+
+	def test_this_word_becomes_the_shown_doctype(self):
+		from flow.lib.agent import _with_referenced_doctype
+
+		msgs = self._history("Sales Invoice") + [{"role": "user", "content": "how can I make this invoice paid?"}]
+		self.assertEqual(_with_referenced_doctype(msgs[-1]["content"], msgs), "how can I make this Sales Invoice paid?")
+
+	def test_unrelated_word_is_left_alone(self):
+		from flow.lib.agent import _with_referenced_doctype
+
+		msgs = self._history("Sales Invoice") + [{"role": "user", "content": "how do I cancel that order?"}]
+		self.assertEqual(_with_referenced_doctype(msgs[-1]["content"], msgs), "how do I cancel that order?")
+
