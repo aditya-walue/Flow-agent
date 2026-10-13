@@ -199,6 +199,7 @@ def _precheck_query(args: dict[str, Any]) -> str | None:
 	unknown = []
 	for key, condition in filters.items():
 		fieldname = key if (meta.has_field(key) or key in STANDARD_COLUMNS) else by_label.get(str(key).lower())
+		fieldname = fieldname or _select_field_for_value(meta, condition)
 		if not fieldname:
 			names = [f.fieldname for f in meta.fields if f.fieldtype not in LAYOUT_FIELDTYPES]
 			close = difflib.get_close_matches(str(key).lower(), names, n=3, cutoff=0.5)
@@ -207,11 +208,31 @@ def _precheck_query(args: dict[str, Any]) -> str | None:
 		tidy[fieldname] = _normalize_condition(condition)
 	args["filters"] = tidy
 	if unknown:
+		status = meta.get_field("status")
+		hint = (
+			f' To filter by status use {{"status": ...}} with one of: {", ".join(o for o in status.options.split(chr(10)) if o)}.'
+			if status and status.fieldtype == "Select" and status.options
+			else ""
+		)
 		return (
 			f"Not fields of {doctype}: {', '.join(unknown)}. `filters` only holds field conditions "
-			'like {"status": "Paid"}; put order_by, fields and limit beside it.'
+			'like {"status": "Paid"}; put order_by, fields and limit beside it.' + hint
 		)
 	return None
+
+
+def _select_field_for_value(meta: Any, value: Any) -> str | None:
+	"""The one Select field that has `value` as an option ({"payment_status": "Unpaid"} on a
+	Sales Invoice -> status): small models invent the key but usually get the value right."""
+	if not isinstance(value, str) or not value.strip():
+		return None
+	wanted = value.strip().lower()
+	matches = [
+		f.fieldname
+		for f in meta.fields
+		if f.fieldtype == "Select" and wanted in {o.strip().lower() for o in (f.options or "").split("\n")}
+	]
+	return matches[0] if len(matches) == 1 else None
 
 
 def _normalize_condition(condition: Any) -> Any:
@@ -645,8 +666,16 @@ def _parse_values(doctype: str, text: str) -> dict[str, Any] | None:
 
 def _route_count(text: str) -> dict[str, Any] | None:
 	match = COUNT_QUESTION.match(text)
-	doctype = match and _doctype_from_phrase(match.group("what"), fuzzy=True)
-	return {"doctype": doctype} if doctype else None
+	if not match:
+		return None
+	doctype = _doctype_from_phrase(match.group("what"), fuzzy=True)
+	if doctype:
+		return {"doctype": doctype}
+	# "how many unpaid sales invoices", "how many customer invoices": the list resolver reads
+	# status words and plain nouns the same way show_records does.
+	from flow.tools.answers import list_target
+
+	return list_target(match.group("what"))
 
 
 def _route_creation_steps(text: str) -> dict[str, Any] | None:

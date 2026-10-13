@@ -644,7 +644,11 @@ class TestQueryCleanup(IntegrationTestCase):
 	def test_unknown_filter_field_is_named(self):
 		from flow.tools.builtins import _precheck_query
 
-		self.assertIn("'priorty'", _precheck_query({"doctype": "ToDo", "filters": {"priorty": "High"}}))
+		self.assertIn("'priorty'", _precheck_query({"doctype": "ToDo", "filters": {"priorty": "not a priority"}}))
+		# A misspelt key with a value that is an option of exactly one Select field uses that field.
+		args = {"doctype": "ToDo", "filters": {"priorty": "High"}}
+		self.assertIsNone(_precheck_query(args))
+		self.assertEqual(args["filters"], {"priority": "High"})
 
 	def test_read_without_fields_returns_key_columns(self):
 		frappe.get_doc({"doctype": "ToDo", "description": "key columns probe"}).insert()

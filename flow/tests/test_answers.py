@@ -139,3 +139,40 @@ class TestStatusSteps(IntegrationTestCase):
 		self.assertEqual(args, {"doctype": "Sales Invoice", "status": "Paid"})
 		self.assertIn("Payment Entry", answer)
 		self.assertIn("submitted", answer)
+
+
+class TestListPhrasing(IntegrationTestCase):
+	"""List and count questions name records by a plain noun and a status word."""
+
+	def test_more_list_phrasings(self):
+		from flow.tools.answers import _route_show_records
+
+		for text in ("is there any open todos?", "are there open todos", "do we have open todos", "do i have any open todos"):
+			self.assertEqual(_route_show_records(text), {"doctype": "ToDo", "filters": {"status": "Open"}}, text)
+
+	def test_count_with_status_word(self):
+		from flow.tools.builtins import _route_count
+
+		self.assertEqual(_route_count("how many open todos are there?"), {"doctype": "ToDo", "filters": {"status": "Open"}})
+
+	def test_unknown_word_falls_through(self):
+		from flow.tools.answers import _route_show_records
+
+		self.assertIsNone(_route_show_records("show me broken todos"))
+
+	def test_invented_filter_key_uses_the_select_field_with_that_value(self):
+		from flow.tools.builtins import _precheck_query
+
+		args = {"doctype": "ToDo", "filters": {"todo_state": "Open"}}
+		self.assertIsNone(_precheck_query(args))
+		self.assertEqual(args["filters"], {"status": "Open"})
+		bad = {"doctype": "ToDo", "filters": {"todo_state": "purple"}}
+		self.assertIn("one of: Open", _precheck_query(bad))
+
+	def test_plain_noun_picks_the_record_type(self):
+		if not frappe.db.exists("DocType", "Sales Invoice"):
+			self.skipTest("ERPNext not installed")
+		from flow.tools.answers import list_target
+
+		self.assertEqual(list_target("unpaid customer invoices"), {"doctype": "Sales Invoice", "filters": {"status": "Unpaid"}})
+		self.assertEqual(list_target("unpaid supplier invoices"), {"doctype": "Purchase Invoice", "filters": {"status": "Unpaid"}})

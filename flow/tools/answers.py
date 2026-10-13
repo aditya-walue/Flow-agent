@@ -50,7 +50,8 @@ SHOW_RECORD = re.compile(
 # Asking to change a record rather than see it: those go to the model (and the approval flow).
 WRITE_INTENT = re.compile(r"\b(create|add|make|update|change|set|edit|delete|remove|cancel|submit|amend|rename|close|mark)\b", re.IGNORECASE)
 LIST_REQUEST = re.compile(
-	r"^\s*(?:please\s+)?(?:list|show(?:\s+me)?|get(?:\s+me)?|display|which|what|any|are\s+there\s+any|do\s+we\s+have\s+any)\s+"
+	r"^\s*(?:please\s+)?(?:list|show(?:\s+me)?|get(?:\s+me)?|display|which|what|any|"
+	r"(?:is|are)\s+there(?:\s+any)?|do\s+(?:we|i)\s+have(?:\s+any)?)\s+"
 	r"(?:(?:all|the|my|our|every)\s+)*(?:(?P<order>latest|recent|newest|last|oldest)\s+)?"
 	r"(?P<rest>[a-z][a-z \-]*?)"
 	r"(?:\s+(?:do\s+we\s+have|are\s+there|exist|in\s+(?:the\s+)?system|we\s+have|present))?\s*[?.!]*\s*$",
@@ -121,24 +122,78 @@ def _doctypes_for_series(record_id: str) -> list[str]:
 
 
 def _list_arguments(rest: str, order: str | None) -> dict[str, Any] | None:
-	"""Arguments for a list request: the DocType, plus a status filter when an adjective in the
-	request is one of its status values ("open todos", "paid invoices")."""
-	words = rest.strip().split()
-	doctype = _builtins()._doctype_from_phrase(" ".join(words), fuzzy=True)
-	status = None
-	if not doctype and len(words) > 1:
-		doctype = _builtins()._doctype_from_phrase(" ".join(words[1:]), fuzzy=True)
-		status = _status_value(doctype, words[0]) if doctype else None
-		if doctype and not status:
-			return None  # an unknown qualifier ("broken invoices"): let the model interpret it
-	if not doctype:
+	"""Arguments for a list request: the DocType, plus a status filter when a word in the request
+	is one of its status values ("open todos", "unpaid customer invoices")."""
+	arguments = list_target(rest)
+	if not arguments:
 		return None
-	arguments: dict[str, Any] = {"doctype": doctype}
-	if status:
-		arguments["filters"] = {"status": status}
 	if order in ("oldest",):
 		arguments["order_by"] = "creation asc"
 	return arguments
+
+
+def list_target(phrase: str) -> dict[str, Any] | None:
+	"""{"doctype"[, "filters"]} for a phrase naming records, optionally with one status word:
+	"sales invoices", "unpaid sales invoices", "unpaid customer invoices", "overdue invoices".
+	None when a word is neither part of the record type nor one of its statuses ("broken
+	invoices"), so the chat model interprets it."""
+	words = (phrase or "").strip().split()
+	if not words:
+		return None
+	doctype = _record_type(words)
+	if doctype:
+		return {"doctype": doctype}
+	for i, word in enumerate(words):
+		rest = words[:i] + words[i + 1 :]
+		doctype = rest and _record_type(rest, status_word=word)
+		status = doctype and _status_value(doctype, word)
+		if status:
+			return {"doctype": doctype, "filters": {"status": status}}
+	return None
+
+
+def _record_type(words: list[str], status_word: str | None = None) -> str | None:
+	"""The DocType `words` name: exactly ("sales invoices"), or by the last word as the end of
+	DocType names, narrowed by the other words ("customer invoices" -> the Invoice type with a
+	Customer link) and by `status_word` being one of its statuses. Of several that still fit,
+	the one with the most matching records, as the one the site actually uses."""
+	builtins = _builtins()
+	exact = builtins._doctype_from_phrase(" ".join(words), fuzzy=True)
+	if exact:
+		return exact
+	noun = _singular(words[-1].lower())
+	candidates = [
+		name for key, name in builtins._doctype_names().items()
+		if key.split()[-1] == noun and frappe.has_permission(name, "read")
+	]
+	for word in words[:-1]:
+		named = builtins._doctype_from_phrase(word)
+		narrowed = [c for c in candidates if word.lower() in c.lower().split() or (named and _links_to(c, named))]
+		if not narrowed:
+			return None  # a qualifier none of them fits
+		candidates = narrowed
+	if status_word:
+		candidates = [c for c in candidates if _status_value(c, status_word)]
+	if len(candidates) <= 1:
+		return candidates[0] if candidates else None
+
+	def used(doctype: str) -> tuple[int, int]:
+		status = status_word and _status_value(doctype, status_word)
+		return (frappe.db.count(doctype, {"status": status}) if status else 0, frappe.db.count(doctype))
+
+	return max(candidates, key=used)
+
+
+def _singular(word: str) -> str:
+	if word.endswith("ies"):
+		return word[:-3] + "y"
+	if word.endswith(("ses", "xes", "ches", "shes")):
+		return word[:-2]
+	return word[:-1] if word.endswith("s") and not word.endswith("ss") else word
+
+
+def _links_to(doctype: str, other: str) -> bool:
+	return any(f.fieldtype == "Link" and f.options == other for f in frappe.get_meta(doctype).fields)
 
 
 def _status_value(doctype: str, word: str) -> str | None:
