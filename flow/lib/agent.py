@@ -700,27 +700,48 @@ def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:
 		total[key] += int(delta.get(key, 0) or 0)
 
 
-# "this invoice", "that order": a record from an earlier answer, named by part of its DocType.
-REFERENCE = re.compile(r"\b(this|that|the same|these|those)\s+([a-z][a-z\-]*)\b", re.IGNORECASE)
+# "this invoice", "that order", "make it paid": a record from an earlier answer.
+REFERENCE = re.compile(r"\b(this|that|these|those|it)\b(?:\s+([a-z][a-z\-]*))?", re.IGNORECASE)
 
 
 def _with_referenced_doctype(text: str, messages: list[dict[str, Any]]) -> str:
-	"""`text` with "this <word>" spelled out as the DocType of the latest tool result whose
-	DocType contains that word ("how can I make this invoice paid?" after a Sales Invoice was shown
-	-> "... this Sales Invoice paid?"), so routes and Laya can recognise it. The stored message is
-	unchanged."""
+	"""`text` with a reference to the record shown before spelled out as its DocType, so routes
+	and Laya can recognise it (the stored message is unchanged):
+	"make this invoice paid" -> "make this Sales Invoice paid" (the word is part of the DocType),
+	"make this as paid" / "make it paid" -> "make this Sales Invoice as paid" / "make the Sales
+	Invoice paid" (no record word follows). A different record word ("that order" after an
+	invoice) is left alone."""
 	match = REFERENCE.search(text or "")
-	if not match:
+	doctype = match and _latest_doctype(messages[:-1])
+	if not doctype:
 		return text
-	word = match.group(2).lower().rstrip("s")
-	for message in reversed(messages[:-1]):
+	word = (match.group(2) or "").lower()
+	names = doctype.lower().split()
+	if word and (word in names or word.rstrip("s") in names):
+		return text[: match.start(2)] + doctype + text[match.end(2) :]
+	if word and word.rstrip("s") in _doctype_words():
+		return text  # names some other record type
+	if match.group(1).lower() == "it":
+		return text[: match.start(1)] + f"the {doctype}" + text[match.end(1) :]
+	return text[: match.end(1)] + f" {doctype}" + text[match.end(1) :]
+
+
+def _latest_doctype(messages: list[dict[str, Any]]) -> str | None:
+	"""DocType of the latest tool result in the conversation that names one."""
+	for message in reversed(messages):
 		if message.get("role") != "tool" or not isinstance(message.get("content"), str):
 			continue
 		try:
 			doctype = json.loads(message["content"]).get("doctype")
 		except (ValueError, AttributeError):
 			continue
-		if isinstance(doctype, str) and word in doctype.lower() and word != doctype.lower():
-			return text[: match.start(2)] + doctype + text[match.end(2) :]
-	return text
+		if isinstance(doctype, str) and doctype:
+			return doctype
+	return None
 
+
+def _doctype_words() -> set[str]:
+	"""Every word used in a DocType name, lower-cased ("sales", "invoice", "order", ...)."""
+	from flow.tools.builtins import _doctype_names
+
+	return {w for name in _doctype_names() for w in name.split()}

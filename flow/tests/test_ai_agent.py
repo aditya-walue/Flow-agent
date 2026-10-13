@@ -851,6 +851,17 @@ class TestReferencedDocType(UnitTestCase):
 		msgs = self._history("Sales Invoice") + [{"role": "user", "content": "how can I make this invoice paid?"}]
 		self.assertEqual(_with_referenced_doctype(msgs[-1]["content"], msgs), "how can I make this Sales Invoice paid?")
 
+	def test_bare_this_or_it_gets_the_shown_doctype(self):
+		from flow.lib.agent import _with_referenced_doctype
+
+		for text, expected in (
+			("how can I make this as paid?", "how can I make this Sales Invoice as paid?"),
+			("how do I mark this paid", "how do I mark this Sales Invoice paid"),
+			("how can I make it paid?", "how can I make the Sales Invoice paid?"),
+		):
+			msgs = self._history("Sales Invoice") + [{"role": "user", "content": text}]
+			self.assertEqual(_with_referenced_doctype(text, msgs), expected)
+
 	def test_unrelated_word_is_left_alone(self):
 		from flow.lib.agent import _with_referenced_doctype
 

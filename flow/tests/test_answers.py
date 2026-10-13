@@ -124,6 +124,10 @@ class TestStatusSteps(IntegrationTestCase):
 		self.assertEqual(args, {"doctype": "ToDo", "status": "Closed"})
 		self.assertIn("Closed", answer)
 
+	def test_status_without_as(self):
+		self.assertEqual(self._answer("how do I mark this todo closed")[0], {"doctype": "ToDo", "status": "Closed"})
+		self.assertEqual(self._answer("how to set a todo to closed")[0], {"doctype": "ToDo", "status": "Closed"})
+
 	def test_unknown_status_or_doctype_falls_through(self):
 		self.assertIsNone(self._answer("how do I mark a todo as purple")[0])
 		self.assertIsNone(self._answer("how do I mark my car as paid")[0])

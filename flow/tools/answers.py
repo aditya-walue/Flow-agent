@@ -90,9 +90,11 @@ def _record_from_text(text: str) -> tuple[str, str] | None:
 	named = _builtins()._find_doctype_in_text(text)
 	tokens = RECORD_ID.findall(text or "")
 	if named:
-		# With the DocType named, any word containing a digit may be its ID (random IDs like
-		# "1bj14mc8ae" don't follow a naming series).
-		tokens += [w for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9-./]{3,}", text or "") if re.search(r"\d", w)]
+		# With the DocType named, a word may be its ID even outside a naming series: random IDs
+		# ("1bj14mc8ae", or all letters like "hfpssoeeph"). Digit-bearing words are tried first;
+		# a word only matches when a record with exactly that ID exists.
+		words = re.findall(r"[A-Za-z0-9][A-Za-z0-9-./]{3,}", text or "")
+		tokens += [w for w in words if re.search(r"\d", w)] + [w for w in words if len(w) >= 8 and w.isalpha()]
 	for token in dict.fromkeys(tokens):
 		token = token.strip(".-/")
 		for doctype in ([named] if named else []) + _doctypes_for_series(token):
@@ -543,12 +545,12 @@ def _route(doctype: str) -> str:
 # "how to set a task to closed", "how do I pay a purchase invoice"
 STATUS_QUESTION = re.compile(
 	r"^\s*(?:how\s+(?:do|can|should|would)\s+(?:i|we|you)|how\s+to|steps\s+(?:to|for))\s+"
-	r"(?:(?:make|mark|set|get|turn|change|move|update)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what>[a-z][a-z \-]*?)"
-	r"\s+(?:as|to|into|be)\s+(?:(?:a|an)\s+)?(?P<status>[a-z][a-z \-]*?)"
+	r"(?:(?:make|mark|set|get|turn|change|move|update)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<rest>[a-z][a-z \-]*?)"
 	r"|(?P<verb>pay|close|cancel|submit|complete)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z \-]*?))"
 	r"\s*[?.!]*\s*$",
 	re.IGNORECASE,
 )
+CONNECTORS = {"as", "to", "into", "be", "marked", "a", "an"}
 # Verb -> the status it produces, and status word -> the stem of the documents that set it
 # (English word forms, not site data).
 VERB_STATUS = {"pay": "Paid", "close": "Closed", "cancel": "Cancelled", "submit": "Submitted", "complete": "Completed"}
@@ -560,9 +562,25 @@ def _route_status_steps(text: str) -> dict[str, Any] | None:
 	match = STATUS_QUESTION.match(text or "")
 	if not match:
 		return None
-	what = match.group("what") or match.group("what2")
-	status = match.group("status") or VERB_STATUS.get((match.group("verb") or "").lower())
-	return status_arguments(what, status)
+	if match.group("verb"):
+		return status_arguments(match.group("what2"), VERB_STATUS.get(match.group("verb").lower()))
+	return _split_status(match.group("rest"))
+
+
+def _split_status(rest: str) -> dict[str, Any] | None:
+	"""{"doctype", "status"} from "<record type> [as|to] <status>", trying the last one to three
+	words as the status ("sales invoice as paid", "this sales order completed")."""
+	words = (rest or "").split()
+	for n in (1, 2, 3):
+		if len(words) <= n:
+			break
+		head, status = words[:-n], " ".join(words[-n:])
+		while head and head[-1].lower() in CONNECTORS:
+			head = head[:-1]
+		found = head and status_arguments(" ".join(head), status)
+		if found:
+			return found
+	return None
 
 
 def status_arguments(what_phrase: str, status_phrase: str) -> dict[str, Any] | None:
@@ -651,8 +669,7 @@ def _status_creator(meta: Any, option: str) -> str | None:
 
 # Laya: "could you tell me the way to get this sales invoice marked as paid"
 LOOSE_STATUS = re.compile(
-	r"\b(?:make|mark|set|get|turn|change|move)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what>[a-z][a-z \-]*?)"
-	r"\s+(?:marked\s+)?(?:as|to|into)\s+(?P<status>[a-z]+(?:\s+[a-z]+)?)\b"
+	r"\b(?:make|mark|set|get|turn|change|move)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<rest>[a-z][a-z \-]*)"
 	r"|\b(?P<verb>pay|close|cancel|submit)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z \-]*)",
 	re.IGNORECASE,
 )
@@ -662,7 +679,7 @@ def loose_status(text: str) -> dict[str, Any] | None:
 	match = LOOSE_STATUS.search(text or "")
 	if not match:
 		return None
-	what = match.group("what") or match.group("what2")
-	status = match.group("status") or VERB_STATUS.get((match.group("verb") or "").lower())
-	return status_arguments(what, status)
+	if match.group("verb"):
+		return status_arguments(match.group("what2"), VERB_STATUS.get(match.group("verb").lower()))
+	return _split_status(match.group("rest"))
 
