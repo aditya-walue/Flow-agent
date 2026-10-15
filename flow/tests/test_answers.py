@@ -176,3 +176,48 @@ class TestListPhrasing(IntegrationTestCase):
 
 		self.assertEqual(list_target("unpaid customer invoices"), {"doctype": "Sales Invoice", "filters": {"status": "Unpaid"}})
 		self.assertEqual(list_target("unpaid supplier invoices"), {"doctype": "Purchase Invoice", "filters": {"status": "Unpaid"}})
+
+
+class TestAskedFields(IntegrationTestCase):
+	"""A question about one record shows the fields its words name, from the record's labels."""
+
+	def test_question_words_pick_fields_by_label(self):
+		from flow.tools.answers import asked_fields
+
+		self.assertIn("description", asked_fields("ToDo", "what is the description of todo abc123"))
+		self.assertEqual(asked_fields("ToDo", "show todo abc123", exclude="abc123"), [])
+
+	def test_record_answer_includes_asked_field(self):
+		from flow.tools.answers import _route_show_records, show_records
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "asked field probe", "reference_type": "User"}).insert()
+		args = _route_show_records(f"todo {todo.name}: what is its reference type?")
+		self.assertIn("reference_type", args.get("about", []))
+		self.assertIn("Reference Type", show_records.func(**args)["answer"])
+
+
+class TestCountQuestions(IntegrationTestCase):
+	"""Count questions: totals, breakdowns by a field, and an app or module scope."""
+
+	def test_breakdown_by_a_field(self):
+		from flow.tools.answers import count_arguments
+
+		self.assertEqual(count_arguments("number of open todos by priority"), {"doctype": "ToDo", "filters": {"status": "Open"}, "group_by": "priority"})
+		self.assertEqual(count_arguments("how many todos are there?"), {"doctype": "ToDo"})
+		# A breakdown word that names no field is left to the chat model.
+		self.assertIsNone(count_arguments("how many todos per flavour"))
+
+	def test_grouped_count_answer(self):
+		from flow.tools.builtins import count
+
+		frappe.get_doc({"doctype": "ToDo", "description": "group probe", "priority": "High"}).insert()
+		result = count.func(doctype="ToDo", group_by="priority")
+		self.assertIn("High", result["groups"])
+		self.assertIn("| Priority | Count |", result["answer"])
+
+	def test_scope_by_app_or_module(self):
+		from flow.tools.answers import _scope
+
+		self.assertIn("core", _scope("frappe framework"))
+		self.assertEqual(_scope("core"), {"core"})
+		self.assertIsNone(_scope("the system"))

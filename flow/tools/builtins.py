@@ -557,8 +557,15 @@ COUNT_NAMES_LIMIT = 20
 	precheck=lambda args, context=None: _precheck_query(args),
 	route=lambda text: _route_count(text),
 )
-def count(doctype: DocTypeArg, filters: FiltersArg = None) -> dict[str, Any]:
-	"""Count records ("how many"). Shown to the user directly."""
+def count(
+	doctype: DocTypeArg,
+	filters: FiltersArg = None,
+	group_by: Annotated[str | None, 'Fieldname to count per value ("stage wise", "by status"), e.g. "status". Omit for one total.'] = None,
+) -> dict[str, Any]:
+	"""Count records ("how many"), optionally per value of one field ("leads by status"). Shown
+	to the user directly."""
+	if group_by:
+		return _grouped_count(doctype, filters, group_by)
 	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*", "as": "count"}])
 	total = int(rows[0]["count"]) if rows else 0
 	# Real IDs up front: small models otherwise invent plausible-looking record names.
@@ -665,17 +672,11 @@ def _parse_values(doctype: str, text: str) -> dict[str, Any] | None:
 
 
 def _route_count(text: str) -> dict[str, Any] | None:
-	match = COUNT_QUESTION.match(text)
-	if not match:
-		return None
-	doctype = _doctype_from_phrase(match.group("what"), fuzzy=True)
-	if doctype:
-		return {"doctype": doctype}
-	# "how many unpaid sales invoices", "how many customer invoices": the list resolver reads
-	# status words and plain nouns the same way show_records does.
-	from flow.tools.answers import list_target
+	# "how many leads in Frappe CRM", "what is the total leads? stage wise", "how many unpaid
+	# sales invoices": parsed in answers.count_arguments, shared with Laya.
+	from flow.tools.answers import count_arguments
 
-	return list_target(match.group("what"))
+	return count_arguments(text)
 
 
 def _route_creation_steps(text: str) -> dict[str, Any] | None:
@@ -753,6 +754,25 @@ def _doctype_names() -> dict[str, str]:
 			n.lower(): n for n in frappe.get_all("DocType", filters={"istable": 0}, pluck="name")
 		}
 	return cache
+
+
+def _grouped_count(doctype: str, filters: dict | None, group_by: str) -> dict[str, Any]:
+	meta = frappe.get_meta(doctype)
+	field = meta.get_field(group_by)
+	if not field and group_by not in STANDARD_COLUMNS:
+		raise ValueError(f"{group_by!r} is not a field of {doctype}.")
+	label = field.label if field else group_by
+	rows = frappe.get_list(
+		doctype, filters=filters, fields=[group_by, {"COUNT": "*", "as": "count"}], group_by=group_by,
+		order_by="count desc",
+	)
+	total = sum(int(r["count"]) for r in rows)
+	if not total:
+		return {"doctype": doctype, "count": 0, "groups": {}, "answer": f"There are no **{doctype}** records."}
+	groups = {(r.get(group_by) or "(not set)"): int(r["count"]) for r in rows}
+	table = "\n".join(f"| {value} | {n} |" for value, n in groups.items())
+	answer = f"**{total} {doctype}** record{'s' if total != 1 else ''} by **{label}**:\n\n| {label} | Count |\n|---|---|\n{table}"
+	return {"doctype": doctype, "count": total, "groups": groups, "answer": answer}
 
 
 def _count_answer(doctype: str, total: int, names: list[str]) -> str:

@@ -193,8 +193,12 @@ def _decide(text: str, decision: RouteDecision, available: set[str]) -> None:
 				arguments = loose_status(text)
 				tool = "status_steps" if arguments else None
 	elif intent == "RECORD_LOOKUP" and (decision.asks_count or 0) >= threshold:
-		doctype = _find_doctype_in_text(text)
-		tool, arguments = ("count", {"doctype": doctype}) if doctype else (None, None)
+		from flow.tools.answers import count_arguments
+
+		# The same reading as the exact route; a breakdown or scope it can't map to a field goes
+		# to the chat model rather than becoming a plain total.
+		arguments = count_arguments(text)
+		tool = "count" if arguments else None
 	elif intent == "CREATE":
 		# Laya never routes to create itself: only the read-only "what values do you need"
 		# reply for a request that names a DocType but gives no values.

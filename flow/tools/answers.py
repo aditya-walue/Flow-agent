@@ -78,7 +78,11 @@ def _route_show_records(text: str) -> dict[str, Any] | None:
 	# it, however it is phrased ("pull up", "can you get", "about").
 	by_id = _record_from_text(text) if not WRITE_INTENT.search(text or "") else None
 	if by_id:
-		return {"doctype": by_id[0], "names": [by_id[1]]}
+		arguments: dict[str, Any] = {"doctype": by_id[0], "names": [by_id[1]]}
+		about = asked_fields(by_id[0], text, exclude=by_id[1])
+		if about:
+			arguments["about"] = about
+		return arguments
 	match = LIST_REQUEST.match(text or "")
 	if not match:
 		return None
@@ -132,7 +136,7 @@ def _list_arguments(rest: str, order: str | None) -> dict[str, Any] | None:
 	return arguments
 
 
-def list_target(phrase: str) -> dict[str, Any] | None:
+def list_target(phrase: str, scope: set[str] | None = None) -> dict[str, Any] | None:
 	"""{"doctype"[, "filters"]} for a phrase naming records, optionally with one status word:
 	"sales invoices", "unpaid sales invoices", "unpaid customer invoices", "overdue invoices".
 	None when a word is neither part of the record type nor one of its statuses ("broken
@@ -140,48 +144,156 @@ def list_target(phrase: str) -> dict[str, Any] | None:
 	words = (phrase or "").strip().split()
 	if not words:
 		return None
-	doctype = _record_type(words)
+	doctype = _record_type(words, scope=scope)
 	if doctype:
 		return {"doctype": doctype}
 	for i, word in enumerate(words):
 		rest = words[:i] + words[i + 1 :]
-		doctype = rest and _record_type(rest, status_word=word)
+		doctype = rest and _record_type(rest, status_word=word, scope=scope)
 		status = doctype and _status_value(doctype, word)
 		if status:
 			return {"doctype": doctype, "filters": {"status": status}}
 	return None
 
 
-def _record_type(words: list[str], status_word: str | None = None) -> str | None:
+def _record_type(words: list[str], status_word: str | None = None, scope: set[str] | None = None) -> str | None:
 	"""The DocType `words` name: exactly ("sales invoices"), or by the last word as the end of
 	DocType names, narrowed by the other words ("customer invoices" -> the Invoice type with a
-	Customer link) and by `status_word` being one of its statuses. Of several that still fit,
-	the one with the most matching records, as the one the site actually uses."""
+	Customer link), by `status_word` being one of its statuses and by `scope` (the modules of an
+	app or module the user named: "leads in Frappe CRM" -> CRM Lead). Of several that still fit,
+	the one with the most matching records, as the one the site actually uses; an exact name
+	("Lead") also competes with DocTypes ending in it ("CRM Lead") that way."""
 	builtins = _builtins()
 	exact = builtins._doctype_from_phrase(" ".join(words), fuzzy=True)
 	if exact:
-		return exact
+		siblings = [
+			name for key, name in builtins._doctype_names().items()
+			if key.endswith(" " + exact.lower()) and frappe.has_permission(name, "read")
+		]
+		if not siblings and not scope:
+			return exact
+		candidates = [exact, *siblings]
+		if scope:
+			candidates = [c for c in candidates if _module_key(c) in scope]
+		return _most_used(candidates, status_word, prefer=exact)
 	noun = _singular(words[-1].lower())
 	candidates = [
 		name for key, name in builtins._doctype_names().items()
 		if key.split()[-1] == noun and frappe.has_permission(name, "read")
 	]
+	if scope:
+		candidates = [c for c in candidates if _module_key(c) in scope]
 	for word in words[:-1]:
 		named = builtins._doctype_from_phrase(word)
 		narrowed = [c for c in candidates if word.lower() in c.lower().split() or (named and _links_to(c, named))]
 		if not narrowed:
 			return None  # a qualifier none of them fits
 		candidates = narrowed
+	return _most_used(candidates, status_word)
+
+
+def _most_used(candidates: list[str], status_word: str | None, prefer: str | None = None) -> str | None:
+	"""Of `candidates`, those with `status_word` as a status (when given), then the one with the
+	most matching records, then the most records; ties go to `prefer`."""
 	if status_word:
 		candidates = [c for c in candidates if _status_value(c, status_word)]
 	if len(candidates) <= 1:
 		return candidates[0] if candidates else None
 
-	def used(doctype: str) -> tuple[int, int]:
+	def used(doctype: str) -> tuple[int, int, int]:
 		status = status_word and _status_value(doctype, status_word)
-		return (frappe.db.count(doctype, {"status": status}) if status else 0, frappe.db.count(doctype))
+		return (
+			frappe.db.count(doctype, {"status": status}) if status else 0,
+			frappe.db.count(doctype),
+			1 if doctype == prefer else 0,
+		)
 
 	return max(candidates, key=used)
+
+
+def _module_key(doctype: str) -> str:
+	return (frappe.get_meta(doctype).module or "").lower()
+
+
+def _scope(words: str) -> set[str] | None:
+	"""Modules (lower-cased) an "in <words>" phrase names: a module ("FCRM", "Accounts") or an
+	installed app by name or title ("crm", "Frappe CRM", "HR"); None when it names neither
+	("in the system")."""
+	wanted = " ".join(words.lower().split())
+	if not wanted:
+		return None
+	modules = {m.lower(): m for m in frappe.get_all("Module Def", pluck="name")}
+	if wanted in modules:
+		return {wanted}
+	for app in frappe.get_installed_apps():
+		title = (frappe.get_hooks("app_title", app_name=app) or [app])[0].lower()
+		if wanted in (app.lower(), title, title.removeprefix("frappe ").strip()):
+			return {m.lower() for m in frappe.get_all("Module Def", filters={"app_name": app}, pluck="name")}
+	return None
+
+
+# "how many leads", "what is the total leads? stage wise", "number of open todos by priority",
+# "how many leads in Frappe CRM", "total deals per stage"
+COUNT_PREFIX = re.compile(
+	r"^\s*(?:please\s+)?(?:how\s+many|count(?:\s+of)?(?:\s+the)?|(?:the\s+)?number\s+of|"
+	r"what\s+(?:is|are)\s+the\s+(?:total\s+)?(?:number|count)\s+of|what\s+(?:is|are)\s+the\s+total|"
+	r"(?:give\s+me\s+)?(?:the\s+)?total(?:\s+number)?(?:\s+of)?)\s+(?:total\s+)?(?:(?:the|all)\s+)?",
+	re.IGNORECASE,
+)
+GROUP_WORDS = re.compile(
+	r"\b(?:(?P<a>[a-z]+)[\s-]?wise|(?:grouped\s+|broken\s+down\s+|breakdown\s+)?by\s+(?:the\s+)?(?P<b>[a-z]+)"
+	r"|per\s+(?P<c>[a-z]+)|for\s+each\s+(?P<d>[a-z]+))\b",
+	re.IGNORECASE,
+)
+COUNT_TAIL = re.compile(
+	r"\s+(?:are\s+there|is\s+there|do\s+(?:we|i)\s+have|we\s+have|exist|exists|present|"
+	r"(?:are|is)\s+(?:in|on)\s+(?:the\s+)?(?:system|site)|in\s+(?:the\s+)?(?:system|site))$",
+	re.IGNORECASE,
+)
+def count_arguments(text: str) -> dict[str, Any] | None:
+	"""count() arguments for a count question, or None."""
+	clean = re.sub(r"[?!.,;]+", " ", text or "")
+	match = COUNT_PREFIX.match(clean)
+	if not match:
+		return None
+	rest = clean[match.end() :]
+	group = GROUP_WORDS.search(rest)
+	group_word = None
+	if group:
+		group_word = next(g for g in group.groups() if g)
+		rest = rest[: group.start()] + rest[group.end() :]
+	rest = " ".join(rest.split())
+	rest = COUNT_TAIL.sub("", rest).strip()
+	scope = None
+	in_match = re.search(r"\s+(?:in|from|on)\s+(?:the\s+)?(?P<scope>[a-z][a-z ]*)$", rest, re.IGNORECASE)
+	if in_match:
+		scope = _scope(in_match.group("scope"))
+		if scope:
+			rest = rest[: in_match.start()]
+	arguments = list_target(rest, scope=scope)
+	if not arguments:
+		return None
+	if group_word:
+		field = _group_field(arguments["doctype"], group_word)
+		if not field:
+			return None  # an unknown breakdown: let the model interpret it
+		arguments["group_by"] = field
+	arguments.pop("order_by", None)
+	return arguments
+
+
+def _group_field(doctype: str, word: str) -> str | None:
+	"""The field "<word> wise" / "by <word>" names, by its fieldname or label. None otherwise:
+	the chat model then picks the field from the DocType's own fields (count's group_by)."""
+	meta = frappe.get_meta(doctype)
+	word = _singular(word.lower())
+	for f in meta.fields:
+		if f.fieldtype in ("Select", "Link", "Data", "Check", "Date") and word in (
+			_singular(f.fieldname.lower()),
+			_singular((f.label or "").lower()),
+		):
+			return f.fieldname
+	return None
 
 
 def _singular(word: str) -> str:
@@ -210,8 +322,10 @@ def show_records(
 	names: Annotated[list[str] | None, "Record IDs; omit for a recent list."] = None,
 	filters: Annotated[dict | None, 'e.g. {"status": "Open"}.'] = None,
 	order_by: Annotated[str | None, 'e.g. "creation desc".'] = None,
+	about: Annotated[list[str] | None, 'Fieldnames the user asked about for one record, e.g. ["total_taxes_and_charges", "taxes"].'] = None,
 ) -> dict[str, Any]:
-	"""Show records (by ID, or a recent list) with key fields. Shown to the user directly."""
+	"""Show records (by ID, or a recent list) with key fields, plus the fields the user asked
+	about for a single record. Shown to the user directly."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	route = doctype.lower().replace(" ", "-")
@@ -235,6 +349,12 @@ def show_records(
 		row = rows[0]
 		lines = [f"**[{row.name}](/desk/{route}/{row.name})** — {doctype}"]
 		lines += [f"- **{labels[c]}**: {_fmt(row.get(c))}" for c in columns if c != "name" and row.get(c) not in (None, "")]
+		extra = [f for f in (about or []) if f not in columns and meta.get_field(f)]
+		asked = _asked_values(doctype, row.name, extra)
+		if asked:
+			lines += ["", *asked]
+		elif extra:
+			lines += ["", "The fields you asked about aren't filled in on this record."]
 		return {"answer": "\n".join(lines), "doctype": doctype, "names": [row.name]}
 
 	shown = [c for c in columns if c != "name"][:4]
@@ -737,4 +857,67 @@ def loose_status(text: str) -> dict[str, Any] | None:
 	if match.group("verb"):
 		return status_arguments(match.group("what2"), VERB_STATUS.get(match.group("verb").lower()))
 	return _split_status(match.group("rest"))
+
+
+# ── fields a question asks about ───────────────────────────────────────────────────────────
+
+ASKED_FIELDS_LIMIT = 6
+# A word in more than this share of a DocType's field labels says nothing about which field
+# ("the", "date", "name" on most DocTypes); measured per DocType from its own labels.
+COMMON_WORD_SHARE = 0.15
+
+
+def asked_fields(doctype: str, text: str, exclude: str = "") -> list[str]:
+	"""Fieldnames of `doctype` the question names by their label ("how much is the tax
+	component" -> total_taxes_and_charges, taxes, ...). Only words that are specific within this
+	DocType's own labels count, and words of the DocType's name or the record ID are ignored."""
+	meta = frappe.get_meta(doctype)
+	fields = [
+		f for f in meta.fields
+		if f.label and f.fieldtype not in _builtins().LAYOUT_FIELDTYPES and not f.permlevel and not f.hidden
+	]
+	if not fields:
+		return []
+	label_words = {f.fieldname: {_singular(w) for w in re.findall(r"[a-z]+", f.label.lower())} for f in fields}
+	share = {}
+	for words in label_words.values():
+		for w in words:
+			share[w] = share.get(w, 0) + 1
+	ignore = {_singular(w) for w in re.findall(r"[a-z]+", f"{doctype} {exclude}".lower())}
+	asked = {
+		_singular(w) for w in re.findall(r"[a-z]+", (text or "").lower())
+		if len(w) > 2 and _singular(w) not in ignore
+	}
+	asked = {w for w in asked if w in share and share[w] / len(fields) <= COMMON_WORD_SHARE}
+	scored = [(len(asked & words), f.fieldname) for f in fields if (words := label_words[f.fieldname]) & asked]
+	scored.sort(key=lambda s: -s[0])
+	return [name for _, name in scored][: ASKED_FIELDS_LIMIT * 2]
+
+
+def _asked_values(doctype: str, name: str, fieldnames: list[str]) -> list[str]:
+	"""Markdown lines for the asked fields that have a value on this record: a value per field,
+	a small table for child tables (their list-view columns)."""
+	if not fieldnames:
+		return []
+	doc = frappe.get_doc(doctype, name)
+	lines = []
+	for fieldname in fieldnames:
+		field = doc.meta.get_field(fieldname)
+		value = doc.get(fieldname)
+		if field.fieldtype in ("Table", "Table MultiSelect"):
+			rows = value or []
+			if not rows:
+				continue
+			child = frappe.get_meta(field.options)
+			cols = [c for c in child.fields if c.in_list_view and c.fieldtype not in _builtins().LAYOUT_FIELDTYPES][:4]
+			if not cols:
+				continue
+			lines += [f"**{field.label}**:", "", "| " + " | ".join(c.label for c in cols) + " |", "|---" * len(cols) + "|"]
+			lines += ["| " + " | ".join(_fmt(r.get(c.fieldname)) for c in cols) + " |" for r in rows]
+			lines.append("")
+		elif value not in (None, "", 0) or field.fieldtype in ("Currency", "Float", "Int") and value == 0 and field.reqd:
+			lines.append(f"- **{field.label}**: {_fmt(value)}")
+		if len(lines) >= ASKED_FIELDS_LIMIT * 4:
+			break
+	return lines
 
