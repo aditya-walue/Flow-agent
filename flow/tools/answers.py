@@ -932,7 +932,10 @@ def _asked_values(doctype: str, name: str, fieldnames: list[str]) -> list[str]:
 			lines += [f"**{field.label}**:", "", "| " + " | ".join(c.label for c in cols) + " |", "|---" * len(cols) + "|"]
 			lines += ["| " + " | ".join(_fmt(r.get(c.fieldname)) for c in cols) + " |" for r in rows]
 			lines.append("")
-		elif value not in (None, "", 0) or field.fieldtype in ("Currency", "Float", "Int") and value == 0 and field.reqd:
+		elif field.fieldtype in ("Currency", "Float", "Int", "Percent") and value is not None:
+			# An amount of 0 answers the question ("no tax"), unlike an empty text field.
+			lines.append(f"- **{field.label}**: {_fmt(value)}")
+		elif value not in (None, "") and not (field.fieldtype == "Check" and not value):
 			lines.append(f"- **{field.label}**: {_fmt(value)}")
 		if len(lines) >= ASKED_FIELDS_LIMIT * 4:
 			break
