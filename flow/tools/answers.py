@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from typing import Annotated, Any
+from urllib.parse import quote
 
 import frappe
 
@@ -347,7 +348,7 @@ def show_records(
 
 	if len(rows) == 1 and names:
 		row = rows[0]
-		lines = [f"**[{row.name}](/desk/{route}/{row.name})** — {doctype}"]
+		lines = [f"**[{row.name}](/desk/{route}/{quote(str(row.name))})** — {doctype}"]
 		lines += [f"- **{labels[c]}**: {_fmt(row.get(c))}" for c in columns if c != "name" and row.get(c) not in (None, "")]
 		extra = [f for f in (about or []) if f not in columns and meta.get_field(f)]
 		shown = [f for f in (about or []) if f in columns and row.get(f) not in (None, "")]
@@ -363,7 +364,7 @@ def show_records(
 	header = "| ID | " + " | ".join(labels[c] for c in shown) + " |"
 	sep = "|---" * (len(shown) + 1) + "|"
 	body = [
-		f"| [{r.name}](/desk/{route}/{r.name}) | " + " | ".join(_fmt(r.get(c)) for c in shown) + " |" for r in rows
+		f"| [{r.name}](/desk/{route}/{quote(str(r.name))}) | " + " | ".join(_fmt(r.get(c)) for c in shown) + " |" for r in rows
 	]
 	qualifier = " ".join(f"{k} = {v}" for k, v in (filters or {}).items())
 	title = f"**{total} {doctype} record{'s' if total != 1 else ''}**" + (f" ({qualifier})" if qualifier else "")

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import quote
 from typing import Annotated, Any, Literal
 
 import frappe
@@ -784,7 +785,8 @@ def _count_answer(doctype: str, total: int, names: list[str]) -> str:
 	for name in names:
 		title = _display_name(doctype, name)
 		label = f"{name} — {title}" if title != name else name
-		lines.append(f"- [{label}](/desk/{route}/{name})")
+		# IDs can contain spaces ("Grace Park"); a raw space breaks the Markdown link.
+		lines.append(f"- [{label}](/desk/{route}/{quote(str(name))})")
 	more = f"\n…and {total - len(names)} more." if total > len(names) else ""
 	return (
 		f"There {'is' if total == 1 else 'are'} **{total}** {noun}:\n\n" + "\n".join(lines) + more
@@ -1496,7 +1498,7 @@ def create(
 	result: dict[str, Any] = {
 		"doctype": doctype,
 		"created": created,
-		"links": [f"/desk/{route}/{name}" for name in created],
+		"links": [f"/desk/{route}/{quote(str(name))}" for name in created],
 	}
 	if failures:
 		result["failures"] = failures
