@@ -187,6 +187,19 @@ class TestAskedFields(IntegrationTestCase):
 		self.assertIn("description", asked_fields("ToDo", "what is the description of todo abc123"))
 		self.assertEqual(asked_fields("ToDo", "show todo abc123", exclude="abc123"), [])
 
+	def test_whole_label_match_ranks_first(self):
+		from flow.tools.answers import asked_fields
+
+		# "priority" covers the label "Priority" fully; it beats longer labels that mention it.
+		self.assertEqual(asked_fields("ToDo", "what is the priority of this?")[0], "priority")
+
+	def test_empty_best_match_gives_way_to_a_filled_one(self):
+		from flow.tools.answers import asked_fields
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "tier probe"}).insert()
+		fields = asked_fields("ToDo", "what is the description here?", exclude=todo.name, record=todo.name)
+		self.assertIn("description", fields)
+
 	def test_record_answer_includes_asked_field(self):
 		from flow.tools.answers import _route_show_records, show_records
 

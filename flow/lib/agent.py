@@ -520,7 +520,7 @@ class Agent:
 
 		if WRITE_INTENT.search(text or ""):
 			return None
-		about = asked_fields(page["doctype"], text, exclude=page["name"])
+		about = asked_fields(page["doctype"], text, exclude=page["name"], record=page["name"])
 		if not about:
 			return None
 		return _routed_call("show_records", {"doctype": page["doctype"], "names": [page["name"]], "about": about})

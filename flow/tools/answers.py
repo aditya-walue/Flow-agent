@@ -80,7 +80,7 @@ def _route_show_records(text: str) -> dict[str, Any] | None:
 	by_id = _record_from_text(text) if not WRITE_INTENT.search(text or "") else None
 	if by_id:
 		arguments: dict[str, Any] = {"doctype": by_id[0], "names": [by_id[1]]}
-		about = asked_fields(by_id[0], text, exclude=by_id[1])
+		about = asked_fields(by_id[0], text, exclude=by_id[1], record=by_id[1])
 		if about:
 			arguments["about"] = about
 		return arguments
@@ -865,15 +865,17 @@ def loose_status(text: str) -> dict[str, Any] | None:
 # ── fields a question asks about ───────────────────────────────────────────────────────────
 
 ASKED_FIELDS_LIMIT = 6
-# A word in more than this share of a DocType's field labels says nothing about which field
-# ("the", "date", "name" on most DocTypes); measured per DocType from its own labels.
-COMMON_WORD_SHARE = 0.15
 
 
-def asked_fields(doctype: str, text: str, exclude: str = "") -> list[str]:
-	"""Fieldnames of `doctype` the question names by their label ("how much is the tax
-	component" -> total_taxes_and_charges, taxes, ...). Only words that are specific within this
-	DocType's own labels count, and words of the DocType's name or the record ID are ignored."""
+def asked_fields(doctype: str, text: str, exclude: str = "", record: str | None = None) -> list[str]:
+	"""Fieldnames of `doctype` the question names by their label, best first.
+
+	A field matches when a question word is one of its label's words (or shares a stem with one:
+	"join" ~ "joining", "taxes" ~ "tax"). Fields are ranked by how much of their label the
+	question covers ("which company" covers all of "Company", but little of "Use Company default
+	Cost Center for Round off"), then by how many question words they match. With `record`, the
+	best-ranked group with a value on that record is returned (an empty "Tax Id" gives way to
+	"Total Taxes and Charges: 0.00"); words of the DocType's name and the record ID are ignored."""
 	meta = frappe.get_meta(doctype)
 	fields = [
 		f for f in meta.fields
@@ -881,35 +883,55 @@ def asked_fields(doctype: str, text: str, exclude: str = "") -> list[str]:
 	]
 	if not fields:
 		return []
-	label_words = {f.fieldname: {_singular(w) for w in re.findall(r"[a-z]+", f.label.lower())} for f in fields}
-	share = {}
-	for words in label_words.values():
-		for w in words:
-			share[w] = share.get(w, 0) + 1
 	ignore = {_singular(w) for w in re.findall(r"[a-z]+", f"{doctype} {exclude}".lower())}
-	asked = {
-		_singular(w) for w in re.findall(r"[a-z]+", (text or "").lower())
-		if len(w) > 2 and _singular(w) not in ignore
+	label_words = {
+		f.fieldname: {_singular(w) for w in re.findall(r"[a-z]+", f.label.lower())} - ignore for f in fields
 	}
-	# A question word matches a label word that it starts, or that starts it, past a short
-	# common stem ("join" ~ "joining", "taxes" ~ "tax").
-	vocabulary = list(share)
-	matched = {}
-	for w in asked:
-		for label_word in vocabulary:
-			if label_word == w or (min(len(w), len(label_word)) >= 4 and (label_word.startswith(w) or w.startswith(label_word))):
-				if share[label_word] / len(fields) <= COMMON_WORD_SHARE:
-					matched.setdefault(w, set()).add(label_word)
-	if not matched:
+	asked = {
+		_singular(w) for w in re.findall(r"[a-z]+", (text or "").lower()) if len(w) > 2 and _singular(w) not in ignore
+	}
+	if not asked:
 		return []
-	scored = []
+
+	def same(word: str, label_word: str) -> bool:
+		return word == label_word or (
+			min(len(word), len(label_word)) >= 4 and (label_word.startswith(word) or word.startswith(label_word))
+		)
+
+	ranked = []
 	for f in fields:
-		score = sum(1 for words in matched.values() if words & label_words[f.fieldname])
-		if score:
-			scored.append((score, f.fieldname))
-	best = max(score for score, _ in scored)
-	# Fields matching the most question words ("date of birth" -> Date of Birth, not every date).
-	return [name for score, name in scored if score == best][: ASKED_FIELDS_LIMIT * 2]
+		words = label_words[f.fieldname]
+		if not words:
+			continue
+		covered = {lw for lw in words if any(same(w, lw) for w in asked)}
+		if covered:
+			ranked.append((len(covered) / len(words), len(covered), f.fieldname))
+	if not ranked:
+		return []
+	ranked.sort(key=lambda r: (-r[0], -r[1]))
+	tiers: list[list[str]] = []
+	for coverage, matched, fieldname in ranked:
+		if tiers and tiers[-1][0] == (coverage, matched):
+			tiers[-1][1].append(fieldname)
+		else:
+			tiers.append([(coverage, matched), [fieldname]])
+	if record:
+		doc = frappe.get_doc(doctype, record)
+		for _, names in tiers:
+			if any(_has_value(doc, meta.get_field(n)) for n in names):
+				return names[: ASKED_FIELDS_LIMIT * 2]
+	return tiers[0][1][: ASKED_FIELDS_LIMIT * 2]
+
+
+def _has_value(doc: Any, field: Any) -> bool:
+	value = doc.get(field.fieldname)
+	if field.fieldtype in ("Table", "Table MultiSelect"):
+		return bool(value)
+	if field.fieldtype in ("Currency", "Float", "Int", "Percent"):
+		return value is not None
+	if field.fieldtype == "Check":
+		return bool(value)
+	return value not in (None, "")
 
 
 def _asked_values(doctype: str, name: str, fieldnames: list[str]) -> list[str]:
