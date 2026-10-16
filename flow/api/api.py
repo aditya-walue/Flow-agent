@@ -25,9 +25,13 @@ def start_run(
 	model: str | None = None,
 	attachments: list[str] | str | None = None,
 	stream: bool | str = False,
+	page_doctype: str | None = None,
+	page_name: str | None = None,
 ) -> dict[str, Any] | Response:
 	"""Start a new turn. Creates a session if none is given. `attachments` are uploaded File
-	names whose text is injected into this turn. With `stream=True`, returns SSE."""
+	names whose text is injected into this turn. `page_doctype` / `page_name` are the desk page
+	the user is on (a form or a list), so "this invoice" can mean the one on screen. With
+	`stream=True`, returns SSE."""
 	if not isinstance(input, str) or not input.strip():
 		frappe.throw(_("Input is required."), title=_("Invalid Input"))
 
@@ -36,8 +40,19 @@ def start_run(
 	stream = _is_truthy(stream)
 	files = _parse_attachments(attachments)
 	convo = load_session(session, agent=agent, model=model) if session else new_session(agent, model=model)
-	out = convo.chat(input, attachments=files, stream=stream)
+	out = convo.chat(input, attachments=files, stream=stream, page=_page(page_doctype, page_name))
 	return _sse_response(out) if stream else _summarize(out)
+
+
+def _page(doctype: str | None, name: str | None) -> dict[str, str] | None:
+	"""The page context, kept only when it is a real DocType (and record) the user may read."""
+	if not doctype or not isinstance(doctype, str) or not frappe.db.exists("DocType", doctype):
+		return None
+	if not frappe.has_permission(doctype, "read"):
+		return None
+	if name and isinstance(name, str) and frappe.db.exists(doctype, name) and frappe.has_permission(doctype, "read", name):
+		return {"doctype": doctype, "name": name}
+	return {"doctype": doctype}
 
 
 @frappe.whitelist()

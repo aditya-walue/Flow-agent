@@ -4,7 +4,8 @@
 import json
 from typing import Any
 
-from frappe.tests import UnitTestCase
+import frappe
+from frappe.tests import IntegrationTestCase, UnitTestCase
 
 from flow.lib.agent import (
 	Agent,
@@ -867,4 +868,52 @@ class TestReferencedDocType(UnitTestCase):
 
 		msgs = self._history("Sales Invoice") + [{"role": "user", "content": "how do I cancel that order?"}]
 		self.assertEqual(_with_referenced_doctype(msgs[-1]["content"], msgs), "how do I cancel that order?")
+
+
+class TestPageContext(IntegrationTestCase):
+	"""The desk page the user is on resolves "this" / "it" and is told to the model."""
+
+	def setUp(self):
+		self.todo = frappe.get_doc({"doctype": "ToDo", "description": "page context probe"}).insert()
+		self.page = {"doctype": "ToDo", "name": self.todo.name}
+
+	def test_this_means_the_open_record(self):
+		from flow.lib.agent import _with_referenced_doctype
+
+		msgs = [{"role": "user", "content": "what is the description of this todo?"}]
+		self.assertEqual(
+			_with_referenced_doctype(msgs[0]["content"], msgs, self.page),
+			f"what is the description of this ToDo {self.todo.name}?",
+		)
+		msgs = [{"role": "user", "content": "how do I close it?"}]
+		self.assertEqual(_with_referenced_doctype(msgs[0]["content"], msgs, self.page), f"how do I close the ToDo {self.todo.name}?")
+
+	def test_open_record_routes_its_question(self):
+		agent = frappe.get_doc("Flow Agent", "Flow Lite").assemble()
+		agent.page = self.page
+		call = agent._routed_response([{"role": "user", "content": "what is the description of this todo?"}]).tool_calls[0]
+		self.assertEqual((call.name, call.arguments["names"], call.arguments["about"]), ("show_records", [self.todo.name], ["description"]))
+
+	def test_model_is_told_the_page(self):
+		from flow.lib.agent import _with_page_note
+
+		out = _with_page_note([{"role": "system", "content": "RULES"}, {"role": "user", "content": "hi"}], self.page)
+		self.assertEqual(len(out), 2)
+		self.assertIn(f"ToDo {self.todo.name} open", out[0]["content"])
+
+	def test_page_must_be_readable_and_real(self):
+		from flow.api.api import _page
+
+		self.assertEqual(_page("ToDo", self.todo.name), self.page)
+		self.assertEqual(_page("ToDo", "no-such-todo"), {"doctype": "ToDo"})
+		self.assertIsNone(_page("No Such DocType", "x"))
+
+	def test_open_record_question_without_fields_goes_to_the_model(self):
+		agent = frappe.get_doc("Flow Agent", "Flow Lite").assemble()
+		agent.page = self.page
+		frappe.conf.flow_laya_enabled = 0
+		try:
+			self.assertIsNone(agent._routed_response([{"role": "user", "content": "why is this so late?"}]))
+		finally:
+			frappe.conf.flow_laya_enabled = None
 

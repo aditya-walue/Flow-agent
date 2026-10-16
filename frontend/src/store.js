@@ -310,6 +310,7 @@ async function send(text) {
 				...(sessionName.value && { session: sessionName.value }),
 				...(selectedAgent.value && !sessionName.value && { agent: selectedAgent.value }),
 				...(selectedModel.value && { model: selectedModel.value }),
+				...currentPage(),
 			},
 			(event) => handleEvent(event, assistant),
 			abortController.signal
@@ -600,3 +601,17 @@ export function useStore() {
 		removeAttachment,
 	};
 }
+
+// The desk page the user is on, so "this invoice" can mean the one on screen. A form gives
+// its DocType and record; a list or report gives the DocType. The server checks permissions.
+function currentPage() {
+	const route = (window.frappe && frappe.get_route && frappe.get_route()) || [];
+	const [view, doctype, name] = route;
+	if (!doctype || typeof doctype !== "string") return {};
+	if (view === "Form" && name && typeof name === "string" && !name.startsWith("new-")) {
+		return { page_doctype: doctype, page_name: name };
+	}
+	if (view === "List" || view === "Report" || view === "Form") return { page_doctype: doctype };
+	return {};
+}
+

@@ -350,11 +350,13 @@ def show_records(
 		lines = [f"**[{row.name}](/desk/{route}/{row.name})** — {doctype}"]
 		lines += [f"- **{labels[c]}**: {_fmt(row.get(c))}" for c in columns if c != "name" and row.get(c) not in (None, "")]
 		extra = [f for f in (about or []) if f not in columns and meta.get_field(f)]
+		shown = [f for f in (about or []) if f in columns and row.get(f) not in (None, "")]
 		asked = _asked_values(doctype, row.name, extra)
 		if asked:
 			lines += ["", *asked]
-		elif extra:
-			lines += ["", "The fields you asked about aren't filled in on this record."]
+		elif extra and not shown:
+			labels_asked = ", ".join(meta.get_field(f).label for f in extra[:3])
+			lines += ["", f"**{labels_asked}** {'is' if len(extra) == 1 else 'are'} not filled in on this record."]
 		return {"answer": "\n".join(lines), "doctype": doctype, "names": [row.name]}
 
 	shown = [c for c in columns if c != "name"][:4]
@@ -720,8 +722,8 @@ def _route(doctype: str) -> str:
 # "how to set a task to closed", "how do I pay a purchase invoice"
 STATUS_QUESTION = re.compile(
 	r"^\s*(?:how\s+(?:do|can|should|would)\s+(?:i|we|you)|how\s+to|steps\s+(?:to|for))\s+"
-	r"(?:(?:make|mark|set|get|turn|change|move|update)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<rest>[a-z][a-z \-]*?)"
-	r"|(?P<verb>pay|close|cancel|submit|complete)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z \-]*?))"
+	r"(?:(?:make|mark|set|get|turn|change|move|update)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<rest>[a-z][a-z0-9 ./\-]*?)"
+	r"|(?P<verb>pay|close|cancel|submit|complete)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z0-9 ./\-]*?))"
 	r"\s*[?.!]*\s*$",
 	re.IGNORECASE,
 )
@@ -844,8 +846,8 @@ def _status_creator(meta: Any, option: str) -> str | None:
 
 # Laya: "could you tell me the way to get this sales invoice marked as paid"
 LOOSE_STATUS = re.compile(
-	r"\b(?:make|mark|set|get|turn|change|move)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<rest>[a-z][a-z \-]*)"
-	r"|\b(?P<verb>pay|close|cancel|submit)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z \-]*)",
+	r"\b(?:make|mark|set|get|turn|change|move)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<rest>[a-z][a-z0-9 ./\-]*)"
+	r"|\b(?P<verb>pay|close|cancel|submit)\s+(?:(?:this|that|the|a|an|my|our)\s+)?(?P<what2>[a-z][a-z0-9 ./\-]*)",
 	re.IGNORECASE,
 )
 
@@ -888,10 +890,25 @@ def asked_fields(doctype: str, text: str, exclude: str = "") -> list[str]:
 		_singular(w) for w in re.findall(r"[a-z]+", (text or "").lower())
 		if len(w) > 2 and _singular(w) not in ignore
 	}
-	asked = {w for w in asked if w in share and share[w] / len(fields) <= COMMON_WORD_SHARE}
-	scored = [(len(asked & words), f.fieldname) for f in fields if (words := label_words[f.fieldname]) & asked]
-	scored.sort(key=lambda s: -s[0])
-	return [name for _, name in scored][: ASKED_FIELDS_LIMIT * 2]
+	# A question word matches a label word that it starts, or that starts it, past a short
+	# common stem ("join" ~ "joining", "taxes" ~ "tax").
+	vocabulary = list(share)
+	matched = {}
+	for w in asked:
+		for label_word in vocabulary:
+			if label_word == w or (min(len(w), len(label_word)) >= 4 and (label_word.startswith(w) or w.startswith(label_word))):
+				if share[label_word] / len(fields) <= COMMON_WORD_SHARE:
+					matched.setdefault(w, set()).add(label_word)
+	if not matched:
+		return []
+	scored = []
+	for f in fields:
+		score = sum(1 for words in matched.values() if words & label_words[f.fieldname])
+		if score:
+			scored.append((score, f.fieldname))
+	best = max(score for score, _ in scored)
+	# Fields matching the most question words ("date of birth" -> Date of Birth, not every date).
+	return [name for score, name in scored if score == best][: ASKED_FIELDS_LIMIT * 2]
 
 
 def _asked_values(doctype: str, name: str, fieldnames: list[str]) -> list[str]:

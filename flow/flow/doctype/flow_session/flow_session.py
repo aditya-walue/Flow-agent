@@ -137,6 +137,7 @@ class FlowSession(Document):
 		reference_name: str | None = None,
 		auto_approve: bool = False,
 		stream: bool = False,
+		page: dict[str, str] | None = None,
 	) -> FlowRun | Generator[Event]:
 		"""Run one turn and persist it as a Flow Run. `attachments` are File names whose text
 		is injected into this turn's prompt. With `stream=True`, returns an event generator.
@@ -173,6 +174,8 @@ class FlowSession(Document):
 		# Opt-in (set on the Flow Trigger): run confirmation tools without approval so unattended
 		# trigger runs don't park in Paused waiting for a confirmation no one can give.
 		self._runtime.auto_approve = auto_approve
+		# The desk page the user is on ({"doctype", "name"}), for "this invoice" and the model.
+		self._runtime.page = page
 
 		# The update_memory tool reads this to stamp source_run. Scope tightly to the runtime
 		# call and clear after, so a stale run never leaks onto a later write in this request.

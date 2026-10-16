@@ -115,6 +115,8 @@ class Agent:
 		self.model = Model(model) if isinstance(model, str) else model
 		self.instructions = instructions
 		self.tools = list(tools or [])
+		# The desk page the user is on, {"doctype"[, "name"]}, set per turn by the session.
+		self.page: dict[str, str] | None = None
 		if knowledge:
 			from flow.tools.builtins import bind_search_knowledge
 
@@ -443,6 +445,7 @@ class Agent:
 		agent will run are untouched — this only trims the prompt."""
 		from flow.lib.webllm import is_browser_model
 
+		messages = _with_page_note(messages, self.page)
 		if not is_browser_model(getattr(self.model, "model_id", None)):
 			return messages, tool_schemas
 		if not frappe.conf.get("flow_webllm_compact_context", True):
@@ -475,7 +478,11 @@ class Agent:
 		last = messages[-1] if messages else {}
 		if last.get("role") != "user" or not isinstance(last.get("content"), str):
 			return None
-		text = _with_referenced_doctype(last["content"], messages)
+		text = _with_referenced_doctype(last["content"], messages, self.page)
+		# The open record's ID added to the text only answers a question that names its fields;
+		# "why is this late?" is not a request to see the record (the model, told the page, is).
+		page_id = (self.page or {}).get("name")
+		added_id = bool(page_id) and page_id in text and page_id not in last["content"]
 		for tool in self.tools:
 			if not tool.route:
 				continue
@@ -483,14 +490,40 @@ class Agent:
 				arguments = tool.route(text)
 			except Exception:
 				arguments = None
+			if arguments and added_id and tool.name == "show_records" and not arguments.get("about"):
+				continue
 			if arguments:
 				return _routed_call(tool.name, arguments)
+		# A question about the record the user has open ("how much tax is on this?"): the words
+		# that name its fields, read from that record's own labels, decide what to show.
+		on_page = self._open_record_answer(text)
+		if on_page:
+			return on_page
 		# No exact route: let the optional Laya classifier pick a read-only tool when it's
 		# confident; it returns None (chat model as usual) when disabled, unsure or unavailable.
 		from flow.lib import laya_router
 
-		laya = laya_router.route(text, set(self._tools_by_name))
+		# Laya reads the record type from the page but not the record ID: an ID like HR-EMP-00005
+		# reads to the classifier like an error code.
+		page_type = {"doctype": self.page["doctype"]} if (self.page or {}).get("doctype") else None
+		laya_text = _with_referenced_doctype(last["content"], messages, page_type)
+		laya = laya_router.route(laya_text, set(self._tools_by_name))
 		return _routed_call(*laya) if laya else None
+
+	def _open_record_answer(self, text: str) -> ChatResponse | None:
+		"""show_records for the open record when the question names some of its fields and isn't
+		asking to change anything; None otherwise (Laya / the model, told about the page)."""
+		page = self.page or {}
+		if not page.get("name") or "show_records" not in self._tools_by_name:
+			return None
+		from flow.tools.answers import WRITE_INTENT, asked_fields
+
+		if WRITE_INTENT.search(text or ""):
+			return None
+		about = asked_fields(page["doctype"], text, exclude=page["name"])
+		if not about:
+			return None
+		return _routed_call("show_records", {"doctype": page["doctype"], "names": [page["name"]], "about": about})
 
 	def _pending_calls(self, messages: list[dict[str, Any]]) -> list[ToolCall]:
 		"""Tool calls in the transcript that have no tool result yet (awaiting an answer)."""
@@ -700,30 +733,60 @@ def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:
 		total[key] += int(delta.get(key, 0) or 0)
 
 
-# "this invoice", "that order", "make it paid": a record from an earlier answer.
+# "this invoice", "that order", "make it paid": the record on screen or from an earlier answer.
 REFERENCE = re.compile(r"\b(this|that|these|those|it)\b(?:\s+([a-z][a-z\-]*))?", re.IGNORECASE)
 
 
-def _with_referenced_doctype(text: str, messages: list[dict[str, Any]]) -> str:
-	"""`text` with a reference to the record shown before spelled out as its DocType, so routes
-	and Laya can recognise it (the stored message is unchanged):
-	"make this invoice paid" -> "make this Sales Invoice paid" (the word is part of the DocType),
-	"make this as paid" / "make it paid" -> "make this Sales Invoice as paid" / "make the Sales
-	Invoice paid" (no record word follows). A different record word ("that order" after an
-	invoice) is left alone."""
+def _with_referenced_doctype(
+	text: str, messages: list[dict[str, Any]], page: dict[str, str] | None = None
+) -> str:
+	"""`text` with a reference spelled out, so routes and Laya can recognise it (the stored
+	message is unchanged). The record open on the user's page comes first, then the DocType of
+	the latest tool result:
+	"how much tax is in this invoice" on an open Sales Invoice -> "... this Sales Invoice <ID>";
+	"make this invoice paid" after a Sales Invoice was listed -> "make this Sales Invoice paid";
+	"make it paid" -> "make the Sales Invoice paid". A word naming another record type ("that
+	order" while on an invoice) is left alone."""
 	match = REFERENCE.search(text or "")
-	doctype = match and _latest_doctype(messages[:-1])
-	if not doctype:
+	if not match:
 		return text
 	word = (match.group(2) or "").lower()
-	names = doctype.lower().split()
-	if word and (word in names or word.rstrip("s") in names):
-		return text[: match.start(2)] + doctype + text[match.end(2) :]
-	if word and word.rstrip("s") in _doctype_words():
-		return text  # names some other record type
-	if match.group(1).lower() == "it":
-		return text[: match.start(1)] + f"the {doctype}" + text[match.end(1) :]
-	return text[: match.end(1)] + f" {doctype}" + text[match.end(1) :]
+	for doctype, name in _referents(messages[:-1], page):
+		names = doctype.lower().split()
+		target = f"{doctype} {name}" if name else doctype
+		if word and (word in names or word.rstrip("s") in names):
+			return text[: match.start(2)] + target + text[match.end(2) :]
+		if word and word.rstrip("s") in _doctype_words():
+			continue  # names some other record type: try the next referent
+		if match.group(1).lower() == "it":
+			return text[: match.start(1)] + f"the {target}" + text[match.end(1) :]
+		return text[: match.end(1)] + f" {target}" + text[match.end(1) :]
+	return text
+
+
+def _referents(messages: list[dict[str, Any]], page: dict[str, str] | None) -> list[tuple[str, str]]:
+	"""(DocType, record ID or "") a reference may mean: the open record first, then the latest
+	tool result's DocType."""
+	found = []
+	if page and page.get("doctype"):
+		found.append((page["doctype"], page.get("name") or ""))
+	latest = _latest_doctype(messages)
+	if latest and all(latest != doctype for doctype, _ in found):
+		found.append((latest, ""))
+	return found
+
+
+def _with_page_note(messages: list[dict[str, Any]], page: dict[str, str] | None) -> list[dict[str, Any]]:
+	"""The prompt with one system line saying which desk page the user has open, so "this" and
+	questions without a record ID refer to it. The transcript itself is unchanged."""
+	if not page or not page.get("doctype"):
+		return messages
+	where = f"{page['doctype']} {page['name']} open" if page.get("name") else f"the {page['doctype']} list open"
+	note = f"The user has {where} in the desk; 'this' or 'it' usually means that."
+	if messages and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+		# Joined to the system prompt: trimmed browser prompts keep only the first system message.
+		return [{**messages[0], "content": messages[0]["content"] + "\n\n" + note}, *messages[1:]]
+	return [{"role": "system", "content": note}, *messages]
 
 
 def _latest_doctype(messages: list[dict[str, Any]]) -> str | None:
