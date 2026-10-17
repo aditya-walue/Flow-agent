@@ -39,6 +39,8 @@ def _builtins():
 	return builtins
 
 LIST_LIMIT = 20
+# The most records one list shows, whatever limit is asked for.
+LIST_ALL_LIMIT = 200
 MAIN_FIELDS_LIMIT = 6
 
 # A token that looks like a record ID: letters and digits joined by dashes/dots/slashes, with a
@@ -324,6 +326,7 @@ def show_records(
 	filters: Annotated[dict | None, 'e.g. {"status": "Open"}.'] = None,
 	order_by: Annotated[str | None, 'e.g. "creation desc".'] = None,
 	about: Annotated[list[str] | None, 'Fieldnames the user asked about for one record, e.g. ["total_taxes_and_charges", "taxes"].'] = None,
+	limit: Annotated[int | None, f"How many records to list, up to {LIST_ALL_LIMIT}. Default 20; when the user wants all of them, pass the total count."] = None,
 ) -> dict[str, Any]:
 	"""Show records (by ID, or a recent list) with key fields, plus the fields the user asked
 	about for a single record. Shown to the user directly."""
@@ -336,7 +339,8 @@ def show_records(
 	if names:
 		conditions["name"] = ["in", names]
 	rows = frappe.get_list(
-		doctype, filters=conditions, fields=columns, order_by=order_by or "creation desc", limit=LIST_LIMIT
+		doctype, filters=conditions, fields=columns, order_by=order_by or "creation desc",
+		limit=min(int(limit), LIST_ALL_LIMIT) if limit else LIST_LIMIT,
 	)
 	total = frappe.db.count(doctype, conditions) if not names else len(rows)
 	meta = frappe.get_meta(doctype)
