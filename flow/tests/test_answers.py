@@ -208,6 +208,26 @@ class TestAskedFields(IntegrationTestCase):
 		self.assertIn("reference_type", args.get("about", []))
 		self.assertIn("Reference Type", show_records.func(**args)["answer"])
 
+	def test_asked_fields_are_the_whole_answer(self):
+		from flow.tools.answers import _route_show_records, show_records
+
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "focus probe", "reference_type": "User", "priority": "High"}
+		).insert()
+		args = _route_show_records(f"todo {todo.name}: what is its reference type?")
+		answer = show_records.func(**args)["answer"]
+		self.assertIn("Reference Type", answer)
+		# The key-field summary (priority, status…) is left out when the question named a field.
+		self.assertNotIn("Priority", answer)
+		self.assertNotIn("Status", answer)
+
+	def test_unnamed_fields_still_show_the_summary(self):
+		from flow.tools.answers import show_records
+
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "summary probe", "priority": "High"}).insert()
+		answer = show_records.func(doctype="ToDo", names=[todo.name])["answer"]
+		self.assertIn("Priority", answer)
+
 
 class TestCountQuestions(IntegrationTestCase):
 	"""Count questions: totals, breakdowns by a field, and an app or module scope."""

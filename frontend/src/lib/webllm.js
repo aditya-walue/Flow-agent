@@ -42,6 +42,20 @@ async function getEngine(model, contextWindow, onStatus) {
 	return engine;
 }
 
+// Fetch and load a model ahead of its first call (a greeting is the cue), so the first real
+// question doesn't wait on the multi-GB download. A no-op when the browser can't run it or
+// the model is already loaded; failures are left for the first real call to report.
+export async function preloadModel({ model, context_window_size }, onStatus) {
+	if (!navigator.gpu || !model) return;
+	try {
+		await getEngine(model, context_window_size || DEFAULT_CONTEXT_WINDOW, onStatus);
+	} catch (e) {
+		console.warn("Flow: could not preload the model", e);
+	} finally {
+		onStatus("");
+	}
+}
+
 // Text the user should see: everything before the first tool call, minus a trailing
 // partial "<tool_call>" tag that may still be streaming in.
 function visibleText(full) {

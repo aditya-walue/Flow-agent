@@ -348,16 +348,17 @@ def show_records(
 
 	if len(rows) == 1 and names:
 		row = rows[0]
-		lines = [f"**[{row.name}](/desk/{route}/{quote(str(row.name))})** — {doctype}"]
+		header = f"**[{row.name}](/desk/{route}/{quote(str(row.name))})** — {doctype}"
+		asked_about = [f for f in (about or []) if meta.get_field(f)]
+		if asked_about:
+			# A question about some fields gets just those fields ("what is the tax component?").
+			asked = _asked_values(doctype, row.name, asked_about)
+			if not asked:
+				labels_asked = ", ".join(meta.get_field(f).label for f in asked_about[:3])
+				asked = [f"**{labels_asked}** {'is' if len(asked_about) == 1 else 'are'} not filled in on this record."]
+			return {"answer": "\n".join([header, "", *asked]), "doctype": doctype, "names": [row.name]}
+		lines = [header]
 		lines += [f"- **{labels[c]}**: {_fmt(row.get(c))}" for c in columns if c != "name" and row.get(c) not in (None, "")]
-		extra = [f for f in (about or []) if f not in columns and meta.get_field(f)]
-		shown = [f for f in (about or []) if f in columns and row.get(f) not in (None, "")]
-		asked = _asked_values(doctype, row.name, extra)
-		if asked:
-			lines += ["", *asked]
-		elif extra and not shown:
-			labels_asked = ", ".join(meta.get_field(f).label for f in extra[:3])
-			lines += ["", f"**{labels_asked}** {'is' if len(extra) == 1 else 'are'} not filled in on this record."]
 		return {"answer": "\n".join(lines), "doctype": doctype, "names": [row.name]}
 
 	shown = [c for c in columns if c != "name"][:4]

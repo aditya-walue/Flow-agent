@@ -242,3 +242,25 @@ class TestStrictJson(UnitTestCase):
 		self.assertEqual(out[2]["content"], '{"tool": "get_doc", "arguments": {"name": "1"}}')
 		self.assertTrue(out[3]["content"].startswith("Tool result:"))
 		self.assertEqual(out[4]["content"], '{"reply": "It is open."}')
+
+
+class TestPreloadHint(IntegrationTestCase):
+	"""A greeting hands the panel what it needs to start the model download."""
+
+	def test_hint_names_the_model_and_context_window(self):
+		from flow.assistant.default import DEFAULT_MODEL_ID
+
+		hint = webllm.preload_hint(DEFAULT_MODEL_ID)
+		self.assertEqual(hint["model"], DEFAULT_MODEL_ID.split("/", 1)[1])
+		self.assertGreater(hint["context_window_size"], 0)
+
+	def test_no_hint_for_a_hosted_or_unknown_model(self):
+		self.assertIsNone(webllm.preload_hint("openai/gpt-4o"))
+		self.assertIsNone(webllm.preload_hint("webllm/not-a-flow-model"))
+		self.assertIsNone(webllm.preload_hint(None))
+
+	def test_greeting_carries_the_hint_and_thanks_does_not(self):
+		from flow.tools.builtins import small_talk
+
+		self.assertIn("preload", small_talk.func(kind="greeting"))
+		self.assertNotIn("preload", small_talk.func(kind="thanks"))

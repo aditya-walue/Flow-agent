@@ -284,18 +284,6 @@ GREETING = re.compile(
 	re.IGNORECASE,
 )
 THANKS = re.compile(r"^\s*(thanks?|thank\s+you|thx|ty|ok(ay)?|cool|great|nice|got\s+it)\b[\s!.,]*(so\s+much|a\s+lot|flow)?[\s!.]*$", re.IGNORECASE)
-CAPABILITIES = (
-	# Placeholders use [square brackets]: the panel renders Markdown and drops <angle> text as HTML.
-	"I can help with your data:\n"
-	"- **Count** records: *how many [records] are there?*\n"
-	"- **Show** details: *show the details of [record ID]*\n"
-	"- **Explain** how to create something: *how to create a [record type]?*\n"
-	"- **Explain** how to assign or link: *how to assign [record type] to [record type]?*\n"
-	"- **Create** records for you: *create a [record type] with [field] [value], ...*\n"
-	"- **Diagnose** an error: paste the error message"
-)
-
-
 def _route_small_talk(text: str) -> dict[str, Any] | None:
 	if GREETING.match(text or ""):
 		return {"kind": "greeting"}
@@ -306,12 +294,21 @@ def _route_small_talk(text: str) -> dict[str, Any] | None:
 
 @tool(final_answer=True, route=_route_small_talk)
 def small_talk(kind: Annotated[str, '"greeting" or "thanks".'] = "greeting") -> dict[str, Any]:
-	"""Reply to a greeting or thanks, with what the assistant can do. No data is read."""
+	"""Reply to a greeting ("How can I help you today?") or thanks. No data is read."""
 	if kind == "thanks":
 		return {"answer": "You're welcome! Anything else I can help with?"}
 	first = (frappe.utils.get_fullname(frappe.session.user) or "").split(" ")[0]
 	hello = f"Hi {first}!" if first and first not in ("Administrator", "Guest") else "Hi!"
-	return {"answer": f"{hello} {CAPABILITIES}"}
+	result: dict[str, Any] = {"answer": f"{hello} How can I help you today?"}
+	# The browser model is several GB on first use: a greeting is the cue for the panel to
+	# start fetching it, so the first real question doesn't wait on the download.
+	from flow.assistant.default import DEFAULT_MODEL_ID
+	from flow.lib.webllm import preload_hint
+
+	preload = preload_hint(DEFAULT_MODEL_ID)
+	if preload:
+		result["preload"] = preload
+	return result
 
 
 @tool(final_answer=True, route=lambda text: _route_required_values(text))

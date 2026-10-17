@@ -15,3 +15,6 @@ flow/public/flow_panel/
 
 # Laya checkpoints, ONNX export, datasets and reports (multi-GB; real messages stay out of git)
 laya_data/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

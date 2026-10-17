@@ -1,7 +1,7 @@
 import { ref, computed } from "vue";
 import * as api from "@/api/client";
 import { startRun, resumeRun } from "@/api/stream";
-import { runBrowserRequest } from "@/lib/webllm";
+import { preloadModel, runBrowserRequest } from "@/lib/webllm";
 import { normalizeToolName } from "@/lib/toolMeta";
 import { readLastAgent, readPanelState, writeLastAgent } from "@/lib/panelState";
 import { __ } from "@/lib/translate";
@@ -420,6 +420,7 @@ function handleEvent(event, msg) {
 		}
 		case "tool_ended":
 			setToolResult(msg, event.id, event.result);
+			startPreload(event.result, msg);
 			requestScroll();
 			break;
 		case "done":
@@ -439,6 +440,21 @@ function handleEvent(event, msg) {
 			handleBrowserRequest(event, msg, abortController?.signal);
 			break;
 	}
+}
+
+// A greeting's result carries a `preload` hint: start fetching the browser model now, with
+// progress shown under the reply. Results arrive serialized, so parse before looking.
+function startPreload(result, msg) {
+	let data = result;
+	if (typeof data === "string") {
+		if (!data.includes('"preload"')) return;
+		try {
+			data = JSON.parse(data);
+		} catch {
+			return;
+		}
+	}
+	if (data?.preload) preloadModel(data.preload, (status) => (msg.status = status));
 }
 
 // A browser model's turn: run it here and post the reply back to the server, whose

@@ -77,6 +77,8 @@ const hovered = ref(false);
 		</template>
 
 		<WorkingIndicator v-if="showWorking" :label="message.status" />
+		<!-- A greeting's answer lands at once; the model keeps downloading behind it. -->
+		<WorkingIndicator v-else-if="message.status && !message.pending" :label="message.status" />
 		<FeedbackBar v-if="showFeedback" :message="message" :hovered="hovered" />
 	</div>
 </template>

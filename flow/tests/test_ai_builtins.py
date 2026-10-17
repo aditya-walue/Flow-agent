@@ -702,7 +702,7 @@ class TestSmallTalk(IntegrationTestCase):
 		model = MagicMock()
 		result = Agent(model=model, tools=[small_talk, count]).run("hii")
 		model.chat.assert_not_called()
-		self.assertIn("**Count** records", result.output)
+		self.assertIn("How can I help you today?", result.output)
 
 
 class TestTypoTolerantRoutes(IntegrationTestCase):

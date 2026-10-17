@@ -110,6 +110,22 @@ def browser_context_window(params: dict[str, Any]) -> int:
 	return int(params.get("context_window_size") or DEFAULT_CONTEXT_WINDOW)
 
 
+def preload_hint(model_id: str | None) -> dict[str, Any] | None:
+	"""What the panel needs to load a browser model before its first real call (so a greeting
+	can start the weights download): the model name WebLLM knows and the context window the
+	run will use. None when `model_id` isn't an enabled browser model."""
+	if not is_browser_model(model_id):
+		return None
+	row = frappe.db.get_value("Flow Model", {"model_id": model_id, "enabled": 1}, ["name", "params"])
+	if not row:
+		return None
+	params = row[1]
+	return {
+		"model": model_id.split("/", 1)[1],
+		"context_window_size": browser_context_window(json.loads(params) if params else {}),
+	}
+
+
 def chat_stream(
 	model_id: str,
 	messages: list[dict[str, Any]],
