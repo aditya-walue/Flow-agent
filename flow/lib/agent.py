@@ -607,6 +607,8 @@ TOOL_GROUPS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = tuple(
 # Looking things up is the most common need, and what the model falls back on.
 DEFAULT_TOOLS = ("show_records", "count", "read", "find_doctypes")
 MAX_TOOLS = 6
+# Always offered beside the chosen tools: the fallback when none of them can answer.
+FALLBACK_TOOLS = ("frappe_docs", "web_search")
 RECENT_USER_TURNS = 2
 
 
@@ -628,6 +630,7 @@ def _relevant_tools(
 			wanted.insert(0, tc["function"]["name"])
 	by_name = {t["function"]["name"]: t for t in tool_schemas}
 	chosen = [by_name[n] for n in dict.fromkeys(wanted) if n in by_name][:MAX_TOOLS]
+	chosen += [by_name[n] for n in FALLBACK_TOOLS if n in by_name and by_name[n] not in chosen]
 	return chosen or tool_schemas
 
 

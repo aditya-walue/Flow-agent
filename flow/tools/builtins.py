@@ -1652,8 +1652,16 @@ def run_action(
 	return result
 
 
-from flow.tools.answers import assignment_steps, document_flow, explain_doctype, show_records, status_steps  # noqa: E402
+from flow.tools.answers import (  # noqa: E402
+	assignment_steps,
+	document_flow,
+	explain_doctype,
+	role_permissions,
+	show_records,
+	status_steps,
+)
 from flow.tools.diagnosis import error_diagnosis  # noqa: E402
+from flow.tools.web import frappe_docs, web_search  # noqa: E402
 
 BUILTIN_TOOLS: list[Tool] = [
 	find_doctypes,
@@ -1667,6 +1675,9 @@ BUILTIN_TOOLS: list[Tool] = [
 	document_flow,
 	assignment_steps,
 	status_steps,
+	role_permissions,
+	frappe_docs,
+	web_search,
 	read,
 	count,
 	search_knowledge,

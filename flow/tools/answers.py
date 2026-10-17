@@ -969,3 +969,69 @@ def _asked_values(doctype: str, name: str, fieldnames: list[str]) -> list[str]:
 			break
 	return lines
 
+
+# ── role_permissions ───────────────────────────────────────────────────────────────────────
+
+ROLE_PERMISSIONS_LIMIT = 15
+
+
+@tool(final_answer=True)
+def role_permissions(
+	role: Annotated[str, 'Role name, e.g. "Sales User".'],
+	doctype: Annotated[str | None, "Limit to one DocType, e.g. \"Sales Invoice\". Omit for all."] = None,
+) -> dict[str, Any]:
+	"""What a role is allowed to do (read, write, create, submit… per DocType) and how to give it
+	more or fewer permissions, from the site's permission rules. Use for "how do I give permissions
+	to a role", "what can this role access", "let role X edit Y". Shown to the user directly.
+	Changes nothing."""
+	if not frappe.has_permission("Role", "read"):
+		raise PermissionError("No permission to read roles")
+	if not frappe.db.exists("Role", role):
+		matches = frappe.get_all("Role", filters={"name": ["like", f"%{role}%"]}, pluck="name", limit=5)
+		hint = f" Did you mean: {', '.join(matches)}?" if matches else ""
+		return {"answer": f"There is no role named **{role}**.{hint}"}
+	rights = [
+		f for f in frappe.get_meta("DocPerm").fields
+		if f.fieldtype == "Check" and f.fieldname not in ("if_owner",) and f.label
+	]
+	rows = _role_rules(role, doctype)
+	lines = []
+	if rows:
+		title = f"**{role}** can currently:" if not doctype else f"**{role}** on **{doctype}** can currently:"
+		lines.append(title)
+		for dt, rule in list(rows.items())[:ROLE_PERMISSIONS_LIMIT]:
+			granted = [f.label for f in rights if rule.get(f.fieldname)]
+			lines.append(f"- **{dt}**: {', '.join(granted) if granted else 'no rights ticked'}")
+		if len(rows) > ROLE_PERMISSIONS_LIMIT:
+			lines.append(f"…and {len(rows) - ROLE_PERMISSIONS_LIMIT} more DocTypes.")
+	else:
+		lines.append(f"**{role}** has no permissions{f' on **{doctype}**' if doctype else ''} yet.")
+
+	page = frappe.db.get_value("Page", "permission-manager", ["name", "title"], as_dict=True)
+	if page:
+		target = f" and pick **{doctype}** as the Document Type" if doctype else ", pick the Document Type"
+		lines += [
+			"",
+			f"To change them, open [{page.title}](/desk/{page.name}){target}:",
+			f"1. If **{role}** has no row for it, click **Add A New Rule**, choose the role **{role}** and level 0.",
+			f"2. Tick the rights it should have ({', '.join(f.label for f in rights[:6])}…).",
+			"3. Changes are saved as you tick; users with the role get them on their next page load.",
+		]
+	return {"answer": "\n".join(lines), "role": role, "doctype": doctype}
+
+
+def _role_rules(role: str, doctype: str | None) -> dict[str, dict[str, Any]]:
+	"""{DocType: rule} for the role at permission level 0. A DocType's customised rules (Custom
+	DocPerm) replace its standard ones (DocPerm), as Frappe applies them."""
+	filters: dict[str, Any] = {"role": role, "permlevel": 0}
+	if doctype:
+		filters["parent"] = doctype
+	rules: dict[str, dict[str, Any]] = {}
+	customised = set(frappe.get_all("Custom DocPerm", pluck="parent", distinct=True))
+	for row in frappe.get_all("Custom DocPerm", filters=filters, fields=["*"], order_by="parent"):
+		rules[row.parent] = row
+	for row in frappe.get_all("DocPerm", filters=filters, fields=["*"], order_by="parent"):
+		if row.parent not in customised:
+			rules.setdefault(row.parent, row)
+	return dict(sorted(rules.items()))
+

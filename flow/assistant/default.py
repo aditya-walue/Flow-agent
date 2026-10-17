@@ -31,6 +31,9 @@ DEFAULT_AGENT_TOOLS = (
 	"document_flow",
 	"assignment_steps",
 	"status_steps",
+	"role_permissions",
+	"frappe_docs",
+	"web_search",
 )
 DEFAULT_AGENT_INSTRUCTIONS = """You answer questions about the user's ERPNext / Frappe data using tools.
 
@@ -40,6 +43,7 @@ RULES
 3. "How do I create/add X" -> creation_steps (only for creating). "How do I assign/link X to Y" -> assignment_steps. "How do I mark/make X paid/completed/..." -> status_steps. "What is..." -> explain_doctype. "What happens after..." -> document_flow. Errors -> error_diagnosis.
 4. To create or change a record the user asked for, call create / update with the values they gave; if values are missing, call required_values. The user approves before anything is saved.
 5. If a tool returns an error, fix that exact problem or tell the user briefly.
+6. If no other tool can answer (a general "how does X work" or "how do I ..." about ERPNext / Frappe), call frappe_docs and answer from the page it returns, with its link. Only if it finds nothing, call web_search and list the source links.
 
 Reply in short, plain sentences."""
 

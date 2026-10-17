@@ -34,7 +34,13 @@ def _laya(intent, confidence, asks_count=0.0):
 
 class TestLayaRouter(IntegrationTestCase):
 	def setUp(self):
-		self._conf = {k: frappe.conf.get(k) for k in ("flow_laya_enabled", "flow_laya_threshold")}
+		self._conf = {
+			k: frappe.conf.get(k)
+			for k in ("flow_laya_enabled", "flow_laya_threshold", "flow_laya_model_path", "flow_laya_backend")
+		}
+		# These tests stub Laya; a site pointed at a real checkpoint must not load it here.
+		frappe.conf.flow_laya_model_path = None
+		frappe.conf.flow_laya_backend = None
 		frappe.conf.flow_laya_enabled = True
 		frappe.conf.flow_laya_threshold = 0.8
 
