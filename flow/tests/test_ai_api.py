@@ -101,6 +101,20 @@ def _memory_call(content: str = "Widget A maps to WGT-001.", call_id: str = "m1"
 	)
 
 
+# These tests stub the chat model. A site with Laya on (flow_laya_enabled) would answer some
+# prompts before it once its model has loaded, so Laya is off for this module. Patched, not set
+# in frappe.conf: the test runner reloads site config between classes.
+_LAYA_OFF = patch("flow.lib.laya_router.enabled", return_value=False)
+
+
+def setUpModule():
+	_LAYA_OFF.start()
+
+
+def tearDownModule():
+	_LAYA_OFF.stop()
+
+
 class TestStartRun(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
