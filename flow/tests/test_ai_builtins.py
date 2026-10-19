@@ -100,6 +100,19 @@ class TestRead(IntegrationTestCase):
 		rows = read(doctype="ToDo", filters={"description": "fields probe"}, fields=["name", "description"])
 		self.assertEqual(rows[0]["description"], "fields probe")
 
+	def test_pagination_with_start(self):
+		t1 = frappe.get_doc({"doctype": "ToDo", "description": "read pagination probe 1"}).insert()
+		t2 = frappe.get_doc({"doctype": "ToDo", "description": "read pagination probe 2"}).insert()
+		rows = read(
+			doctype="ToDo",
+			filters={"description": ["like", "%read pagination probe%"]},
+			order_by="creation asc",
+			limit=1,
+			start=1,
+		)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0]["name"], t2.name)
+
 
 class TestCount(IntegrationTestCase):
 	def tearDown(self):
@@ -115,6 +128,21 @@ class TestCount(IntegrationTestCase):
 		self.assertEqual(result["count"], 3)
 		self.assertEqual(len(result["names"]), 3)
 		self.assertTrue(all(frappe.db.exists("ToDo", n) for n in result["names"]))
+
+	def test_zero_count_skips_names(self):
+		result = count(doctype="ToDo", filters={"description": "nonexistent descriptionxyz123"})
+		self.assertEqual(result["count"], 0)
+		self.assertEqual(result["names"], [])
+		self.assertIn("no **ToDo** records", result["answer"])
+
+	def test_batch_display_names(self):
+		from flow.tools.builtins import _batch_display_names
+
+		t1 = frappe.get_doc({"doctype": "ToDo", "description": "batch display probe 1"}).insert()
+		t2 = frappe.get_doc({"doctype": "ToDo", "description": "batch display probe 2"}).insert()
+		titles = _batch_display_names("ToDo", [t1.name, t2.name])
+		self.assertEqual(titles[t1.name], "batch display probe 1")
+		self.assertEqual(titles[t2.name], "batch display probe 2")
 
 	def test_permission_denied_raises(self):
 		frappe.set_user("Guest")

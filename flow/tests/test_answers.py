@@ -13,6 +13,7 @@ from flow.tools.answers import (
 	_route_show_records,
 	document_flow,
 	explain_doctype,
+	role_permissions,
 	show_records,
 )
 
@@ -78,6 +79,24 @@ class TestAnswerRoutes(IntegrationTestCase):
 
 		tidy = _tidy_filters("ToDo", {"date": ["<", "today()"]})
 		self.assertEqual(tidy["date"], ["<", frappe.utils.today()])
+
+	def test_show_records_pagination(self):
+		for i in range(3):
+			frappe.get_doc({"doctype": "ToDo", "description": f"show pagination probe {i}"}).insert()
+		res = show_records(
+			doctype="ToDo",
+			filters={"description": ["like", "%show pagination probe%"]},
+			limit=2,
+			start=1,
+			order_by="creation asc",
+		)
+		self.assertIn("Showing records 2 to 3 of 3.", res["answer"])
+		self.assertEqual(len(res["names"]), 2)
+
+	def test_role_permissions_for_doctype(self):
+		res = role_permissions(role="System Manager", doctype="ToDo")
+		self.assertIn("System Manager", res["answer"])
+		self.assertIn("ToDo", res["answer"])
 
 
 

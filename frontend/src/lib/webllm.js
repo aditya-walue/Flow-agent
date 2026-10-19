@@ -16,6 +16,8 @@ const STOP_SEQUENCES = ["</tool_call>", "<tool_response"];
 let libPromise = null;
 let engine = null;
 let engineKey = null;
+let engineInitPromise = null;
+let deviceLostHandlerAttached = false;
 
 function loadLib() {
 	libPromise ||= import(/* @vite-ignore */ WEBLLM_URL).catch((e) => {
@@ -25,26 +27,130 @@ function loadLib() {
 	return libPromise;
 }
 
-// One engine per page; switching models reloads it in place.
-async function getEngine(model, contextWindow, onStatus) {
-	const key = `${model}:${contextWindow}`;
-	if (engine && engineKey === key) return engine;
-
-	const webllm = await loadLib();
-	const initProgressCallback = (p) =>
-		onStatus(__("Loading {0}: {1}%", [model, Math.round((p.progress || 0) * 100)]));
-	const chatOpts = { context_window_size: contextWindow };
-
-	if (engine) await engine.reload(model, chatOpts);
-	else engine = await webllm.CreateMLCEngine(model, { initProgressCallback }, chatOpts);
-	engineKey = key;
-	onStatus("");
-	return engine;
+// Reset the engine instance (e.g. after unrecoverable error or GPU device loss)
+export function resetEngine() {
+	if (engine) {
+		try {
+			engine.unload?.();
+		} catch {
+			// ignore unload errors
+		}
+	}
+	engine = null;
+	engineKey = null;
+	engineInitPromise = null;
+	deviceLostHandlerAttached = false;
 }
 
-// Fetch and load a model ahead of its first call (a greeting is the cue), so the first real
-// question doesn't wait on the multi-GB download. A no-op when the browser can't run it or
-// the model is already loaded; failures are left for the first real call to report.
+export function isEngineLoaded(model, contextWindow = DEFAULT_CONTEXT_WINDOW) {
+	const key = `${model}:${contextWindow}`;
+	return Boolean(engine && engineKey === key);
+}
+
+// Verify WebGPU availability and adapter compatibility
+export async function verifyWebGPU() {
+	if (typeof navigator === "undefined" || !navigator.gpu) {
+		throw new Error(
+			__("This browser does not support WebGPU, which browser models require. Use a recent Chrome or Edge with hardware acceleration enabled.")
+		);
+	}
+	try {
+		const adapter = await navigator.gpu.requestAdapter();
+		if (!adapter) {
+			throw new Error(
+				__("WebGPU is available in your browser, but no compatible graphics adapter was found. Check your browser GPU flags or hardware acceleration.")
+			);
+		}
+		return adapter;
+	} catch (e) {
+		if (e.message?.includes("WebGPU")) throw e;
+		throw new Error(__("Failed to initialize WebGPU: {0}", [e.message || String(e)]));
+	}
+}
+
+function setupDeviceLostHandler(adapter) {
+	if (deviceLostHandlerAttached || !adapter) return;
+	deviceLostHandlerAttached = true;
+	adapter.requestDevice?.().then((device) => {
+		device?.lost?.then((info) => {
+			console.warn("Flow: WebGPU device lost:", info?.message, info?.reason);
+			resetEngine();
+		});
+	}).catch(() => {});
+}
+
+// Listen to tab visibility changes to detect background suspension
+if (typeof document !== "undefined") {
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState === "visible" && engine) {
+			// Ensure engine is responsive after tab wake
+			if (typeof navigator !== "undefined" && !navigator.gpu) {
+				resetEngine();
+			}
+		}
+	});
+}
+
+// One engine per active application session; switching models reloads it in place.
+// Concurrent calls reuse the in-flight initialization promise.
+export async function getEngine(model, contextWindow = DEFAULT_CONTEXT_WINDOW, onStatus) {
+	const key = `${model}:${contextWindow}`;
+	if (engine && engineKey === key) return engine;
+	if (engineInitPromise && engineKey === key) return engineInitPromise;
+
+	await verifyWebGPU();
+
+	engineKey = key;
+	engineInitPromise = (async () => {
+		let webllm;
+		try {
+			webllm = await loadLib();
+		} catch (e) {
+			throw new Error(__("Failed to load WebLLM from CDN: {0}", [e.message || String(e)]));
+		}
+
+		const initProgressCallback = (p) => {
+			if (onStatus) {
+				const pct = Math.round((p.progress || 0) * 100);
+				onStatus(__("Loading {0}: {1}%", [model, pct]), p);
+			}
+		};
+		const chatOpts = { context_window_size: contextWindow };
+
+		try {
+			if (engine) {
+				await engine.reload(model, chatOpts);
+			} else {
+				engine = await webllm.CreateMLCEngine(model, { initProgressCallback }, chatOpts);
+			}
+			if (navigator.gpu) {
+				navigator.gpu.requestAdapter().then(setupDeviceLostHandler).catch(() => {});
+			}
+			if (onStatus) onStatus("");
+			return engine;
+		} catch (err) {
+			resetEngine();
+			const msg = err?.message || String(err);
+			if (msg.includes("out of memory") || msg.includes("OutOfMemory") || msg.includes("allocation")) {
+				throw new Error(__("Insufficient GPU memory to run {0}. Try closing other browser tabs or using a smaller model.", [model]));
+			}
+			if (msg.includes("quota") || msg.includes("QuotaExceeded")) {
+				throw new Error(__("Storage quota exceeded while caching model weights. Please clear browser storage."));
+			}
+			if (msg.includes("fetch") || msg.includes("network") || msg.includes("NetworkError")) {
+				throw new Error(__("Failed to download model weights. Please check your internet connection."));
+			}
+			throw new Error(__("Model initialization failed: {0}", [msg]));
+		} finally {
+			engineInitPromise = null;
+		}
+	})();
+
+	return engineInitPromise;
+}
+
+// Fetch and load a model ahead of its first call (e.g. on session start or greeting),
+// so questions don't wait on the multi-GB download.
 export async function preloadModel({ model, context_window_size }, onStatus) {
 	if (!navigator.gpu || !model) return;
 	try {
@@ -52,7 +158,7 @@ export async function preloadModel({ model, context_window_size }, onStatus) {
 	} catch (e) {
 		console.warn("Flow: could not preload the model", e);
 	} finally {
-		onStatus("");
+		if (onStatus) onStatus("");
 	}
 }
 
@@ -95,15 +201,9 @@ function strictVisibleText(full) {
 	return out;
 }
 
-// Run one model call. Streams visible text through `onText` and returns
-// { content, usage } with the raw reply (tool-call blocks included) for the server.
+// Run one model call. Streams visible text through `onText` (or falls back to non-streaming)
+// and returns { content, usage } with the raw reply for the server.
 export async function runBrowserRequest(request, { onText, onStatus, signal }) {
-	if (!navigator.gpu) {
-		throw new Error(
-			__("This browser has no WebGPU, which browser models need. Use a recent Chrome or Edge.")
-		);
-	}
-
 	const { context_window_size, ...params } = request.params || {};
 	const eng = await getEngine(
 		request.model,
@@ -116,32 +216,60 @@ export async function runBrowserRequest(request, { onText, onStatus, signal }) {
 	signal?.addEventListener("abort", onAbort);
 	const base = { ...params, messages: request.messages, stream: true, stream_options: { include_usage: true } };
 	let strict = Boolean(request.response_schema);
+	let isStreaming = true;
+
 	try {
 		let chunks;
 		try {
 			chunks = await eng.chat.completions.create(
 				strict
-					? // Decoding is constrained to the schema: the reply can only be valid JSON
-					  // naming an offered tool with its own arguments, or a {"reply": ...}.
+					? // Decoding is constrained to the schema: valid JSON with tool call or reply.
 					  { ...base, response_format: { type: "json_object", schema: request.response_schema } }
-					: // End the turn once a tool call is written: past it a small model rambles or
-					  // invents the tool's result. The server accepts a call without its closing tag.
+					: // End the turn once a tool call is written.
 					  { stop: STOP_SEQUENCES, ...base }
 			);
 		} catch (e) {
-			if (!strict || signal?.aborted) throw e;
-			// The schema couldn't be compiled for this model: fall back to the tagged format,
-			// which the server still parses.
-			console.warn("Flow: strict JSON decoding unavailable, falling back", e);
-			strict = false;
-			chunks = await eng.chat.completions.create({ stop: STOP_SEQUENCES, ...base });
+			if (signal?.aborted) throw e;
+			if (strict) {
+				console.warn("Flow: strict JSON streaming unavailable, falling back to non-strict", e);
+				strict = false;
+				try {
+					chunks = await eng.chat.completions.create({ stop: STOP_SEQUENCES, ...base });
+				} catch (e2) {
+					if (signal?.aborted) throw e2;
+					console.warn("Flow: streaming failed, falling back to non-streaming", e2);
+					isStreaming = false;
+					chunks = await eng.chat.completions.create({
+						...params,
+						messages: request.messages,
+						stream: false,
+						stop: STOP_SEQUENCES,
+					});
+				}
+			} else {
+				console.warn("Flow: streaming failed, falling back to non-streaming", e);
+				isStreaming = false;
+				chunks = await eng.chat.completions.create({
+					...params,
+					messages: request.messages,
+					stream: false,
+					stop: STOP_SEQUENCES,
+				});
+			}
 		}
-		const visibleOf = strict ? strictVisibleText : visibleText;
 
+		if (!isStreaming) {
+			const text = chunks?.choices?.[0]?.message?.content || "";
+			if (onText && text) onText(text);
+			return { content: text, usage: chunks?.usage || {} };
+		}
+
+		const visibleOf = strict ? strictVisibleText : visibleText;
 		let full = "";
 		let shown = 0;
 		let usage = {};
 		for await (const chunk of chunks) {
+			if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 			const delta = chunk.choices?.[0]?.delta?.content;
 			if (delta) {
 				full += delta;

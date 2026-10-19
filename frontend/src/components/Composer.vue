@@ -31,23 +31,30 @@ const text = ref("");
 const el = ref(null);
 const fileInput = ref(null);
 const dragging = ref(false);
+const submitting = ref(false);
 
 const inputDisabled = computed(
-	() => !loaded.value || sending.value || paused.value || needsSetup.value
+	() => !loaded.value || sending.value || paused.value || needsSetup.value || submitting.value
 );
 
-const canSend = computed(() => text.value.trim() && !inputDisabled.value && !uploading.value);
+const canSend = computed(() => text.value.trim() && !inputDisabled.value && !submitting.value && !uploading.value);
 const placeholder = computed(() => {
 	if (!loaded.value) return __("Loading…");
 	if (needsSetup.value) return __("Setup required…");
 	return __("Ask {0}…", [agentLabel(selectedAgent.value)]);
 });
 
-function submit() {
-	if (!canSend.value) return;
-	send(text.value);
+async function submit() {
+	if (!canSend.value || submitting.value || sending.value) return;
+	submitting.value = true;
+	const content = text.value.trim();
 	text.value = "";
 	nextTick(resize);
+	try {
+		await send(content);
+	} finally {
+		submitting.value = false;
+	}
 }
 
 function pickFiles() {

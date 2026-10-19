@@ -42,8 +42,8 @@ NamesArg = Annotated[
 	"Record IDs exactly as count/read returned them — never make them up.",
 ]
 FiltersArg = Annotated[
-	dict | None,
-	'Conditions, e.g. {"status": "Paid"} or {"name": ["in", [IDs]]}. Omit for all.',
+	dict[str, Any] | None,
+	'Conditions as a JSON object, e.g. {"status": "Paid"}. Omit for all records.',
 ]
 
 
@@ -80,7 +80,8 @@ def describe(
 	"""Get a DocType's fields (fieldname, label, type, required, options), your permissions,
 	whether it is submittable, and its active workflow.
 
-	Use before create/update and to answer "how do I create X" with the real required fields.
+	Use for internal model inspection before create/update to discover field names and types.
+	Does not guide the user (use creation_steps to explain how to create records in the Desk).
 	Link fields hold the name of a record of their `options` DocType; Table fields hold a list
 	of row objects of their `options` DocType. Does not return record values — use read.
 	"""
@@ -135,14 +136,19 @@ def read(
 	fields: Annotated[list[str] | None, 'Fieldnames, e.g. ["status", "grand_total"]. Omit for key columns.'] = None,
 	limit: Annotated[int, "Max records."] = 20,
 	order_by: Annotated[str | None, 'e.g. "creation desc".'] = None,
+	start: Annotated[int, "Offset for pagination (number of records to skip). Default 0."] = 0,
 ) -> list[dict]:
-	"""Get specific field values of records, as data for you to use."""
+	"""Get specific field values of records, as data for you to use. For internal model reasoning
+	before taking action (e.g. checking values before an update); do not use to display lists to
+	the user (use show_records instead)."""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
+	start = max(int(start or 0), 0)
 	return frappe.get_list(
 		doctype,
 		filters=filters,
 		fields=fields or _key_columns(doctype),
 		limit=limit,
+		start=start,
 		order_by=order_by,
 	)
 
@@ -157,13 +163,16 @@ OPERATOR_ALIASES = {
 	"contains": "like", "includes": "like",
 	"notin": "not in", "nin": "not in",
 }
-QUERY_OPTIONS = ("order_by", "fields", "limit")
+QUERY_OPTIONS = ("order_by", "fields", "limit", "start")
 KEY_COLUMNS_LIMIT = 6
 
 
 def _key_columns(doctype: str) -> list[str]:
 	"""The columns worth showing when the model asks for records without naming fields: the
 	ID, title, status and the DocType's list-view columns (a bare list of IDs answers nothing)."""
+	cache = frappe.flags.flow_key_columns = getattr(frappe.flags, "flow_key_columns", None) or {}
+	if doctype in cache:
+		return cache[doctype]
 	meta = frappe.get_meta(doctype)
 	picked = ["name"]
 	for fieldname in (meta.title_field, "status"):
@@ -177,7 +186,9 @@ def _key_columns(doctype: str) -> list[str]:
 			and f.fieldtype not in ("Table", "Table MultiSelect", "Text Editor", "HTML", "Image", "Attach Image")
 		):
 			picked.append(f.fieldname)
-	return list(dict.fromkeys(picked))[: KEY_COLUMNS_LIMIT + 1]
+	result = list(dict.fromkeys(picked))[: KEY_COLUMNS_LIMIT + 1]
+	cache[doctype] = result
+	return result
 
 
 def _precheck_query(args: dict[str, Any]) -> str | None:
@@ -194,6 +205,10 @@ def _precheck_query(args: dict[str, Any]) -> str | None:
 			value = filters.pop(option)
 			if option in args and not args.get(option):
 				args[option] = value
+	if "offset" in filters:
+		offset_val = filters.pop("offset")
+		if "start" in args and not args.get("start"):
+			args["start"] = offset_val
 	meta = frappe.get_meta(doctype)
 	by_label = {(f.label or "").lower(): f.fieldname for f in meta.fields if f.label and f.fieldtype not in LAYOUT_FIELDTYPES}
 	tidy: dict[str, Any] = {}
@@ -529,11 +544,16 @@ def _field_hint(field: Any, date_format: str = "yyyy-mm-dd") -> str:
 	if field.fieldtype == "Link" and field.options == "DocType":
 		return f"{label}: a document type, e.g. Customer"
 	if field.fieldtype == "Link" and field.options:
-		target = frappe.get_meta(field.options)
-		leaf_only = {"is_group": 0} if target.is_tree and target.has_field("is_group") else None
-		names = frappe.get_all(
-			field.options, filters=leaf_only, pluck="name", order_by="creation asc", limit=LINK_EXAMPLES + 1
-		)
+		cache = frappe.flags.flow_link_examples = getattr(frappe.flags, "flow_link_examples", None) or {}
+		if field.options in cache:
+			names = cache[field.options]
+		else:
+			target = frappe.get_meta(field.options)
+			leaf_only = {"is_group": 0} if target.is_tree and target.has_field("is_group") else None
+			names = frappe.get_all(
+				field.options, filters=leaf_only, pluck="name", order_by="creation asc", limit=LINK_EXAMPLES + 1
+			)
+			cache[field.options] = names
 		if len(names) == 1:
 			return f"{label}: {names[0]}"
 		if names and len(names) <= LINK_EXAMPLES:
@@ -570,8 +590,12 @@ def count(
 	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*", "as": "count"}])
 	total = int(rows[0]["count"]) if rows else 0
 	# Real IDs up front: small models otherwise invent plausible-looking record names.
-	names = frappe.get_list(
-		doctype, filters=filters, pluck="name", order_by="creation desc", limit=COUNT_NAMES_LIMIT
+	names = (
+		frappe.get_list(
+			doctype, filters=filters, pluck="name", order_by="creation desc", limit=COUNT_NAMES_LIMIT
+		)
+		if total > 0
+		else []
 	)
 	return {"doctype": doctype, "count": total, "names": names, "answer": _count_answer(doctype, total, names)}
 
@@ -782,8 +806,9 @@ def _count_answer(doctype: str, total: int, names: list[str]) -> str:
 		return f"There are no **{doctype}** records."
 	noun = doctype if total == 1 else f"{doctype} records"
 	lines = []
+	titles = _batch_display_names(doctype, names)
 	for name in names:
-		title = _display_name(doctype, name)
+		title = titles.get(name, name)
 		label = f"{name} — {title}" if title != name else name
 		# IDs can contain spaces ("Grace Park"); a raw space breaks the Markdown link.
 		lines.append(f"- [{label}](/desk/{route}/{quote(str(name))})")
@@ -794,14 +819,36 @@ def _count_answer(doctype: str, total: int, names: list[str]) -> str:
 	)
 
 
-def _display_name(doctype: str, name: str) -> str:
+def _batch_display_names(doctype: str, names: list[str]) -> dict[str, str]:
+	"""Map record names to their display titles in a single query."""
+	if not names:
+		return {}
 	meta = frappe.get_meta(doctype)
+	title_field = None
 	for fieldname in (meta.title_field, f"{frappe.scrub(doctype)}_name"):
 		if fieldname and meta.has_field(fieldname):
-			value = frappe.db.get_value(doctype, name, fieldname)
-			if isinstance(value, str) and value.strip():
-				return value.strip()[:80]
-	return name
+			title_field = fieldname
+			break
+	if not title_field:
+		return {n: n for n in names}
+	rows = frappe.get_list(
+		doctype,
+		filters={"name": ["in", names]},
+		fields=["name", title_field],
+		limit=len(names),
+	)
+	result: dict[str, str] = {}
+	for r in rows:
+		val = r.get(title_field)
+		if isinstance(val, str) and val.strip():
+			result[r["name"]] = val.strip()[:80]
+		else:
+			result[r["name"]] = r["name"]
+	return {n: result.get(n, n) for n in names}
+
+
+def _display_name(doctype: str, name: str) -> str:
+	return _batch_display_names(doctype, [name]).get(name, name)
 
 
 KNOWLEDGE_SEARCH_SLUG = "search_knowledge"
@@ -1439,6 +1486,9 @@ def _field_facts(doctype: str | None) -> tuple[dict[str, str], dict[str, str]]:
 	e.g. the site's single Company)."""
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return {}, {}
+	cache = frappe.flags.flow_field_facts = getattr(frappe.flags, "flow_field_facts", None) or {}
+	if doctype in cache:
+		return cache[doctype]
 	meta = frappe.get_meta(doctype)
 	fields = [f for m in [meta, *(frappe.get_meta(t.options) for t in meta.get_table_fields())] for f in m.fields]
 	defaults = {f.fieldname: str(f.default).lower() for f in fields if f.default}
@@ -1448,7 +1498,8 @@ def _field_facts(doctype: str | None) -> tuple[dict[str, str], dict[str, str]]:
 			names = frappe.get_all(f.options, pluck="name", limit=2)
 			if len(names) == 1:
 				sole_links[f.fieldname] = names[0]
-	return defaults, sole_links
+	cache[doctype] = (defaults, sole_links)
+	return cache[doctype]
 
 
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
@@ -1505,6 +1556,19 @@ def create(
 	return result
 
 
+def _child_fields_map(doctype: str) -> list[tuple[str, str, set[str]]]:
+	"""(table_fieldname, child_doctype, set_of_child_fieldnames) cached for the request."""
+	cache = frappe.flags.flow_child_fields = getattr(frappe.flags, "flow_child_fields", None) or {}
+	if doctype not in cache:
+		meta = frappe.get_meta(doctype)
+		res = []
+		for table in meta.get_table_fields():
+			child = frappe.get_meta(table.options)
+			res.append((table.fieldname, table.options, {f.fieldname for f in child.fields}))
+		cache[doctype] = res
+	return cache[doctype]
+
+
 def _misplaced_child_fields(doctype: str, values: dict[str, Any]) -> str | None:
 	"""Explain top-level keys that are really fields of one of the doctype's child tables
 	(e.g. `item_code` on a Sales Invoice). Frappe would otherwise drop them silently and fail
@@ -1516,14 +1580,13 @@ def _misplaced_child_fields(doctype: str, values: dict[str, Any]) -> str | None:
 		return None
 
 	hints: list[str] = []
-	for table in meta.get_table_fields():
-		child = frappe.get_meta(table.options)
-		owned = [key for key in unknown if child.has_field(key)]
+	for table_fieldname, options, child_fieldnames in _child_fields_map(doctype):
+		owned = [key for key in unknown if key in child_fieldnames]
 		if owned:
 			example = ", ".join(f'"{key}": ...' for key in owned)
 			hints.append(
-				f"{', '.join(owned)} belong to the child table `{table.fieldname}` ({table.options}); "
-				f'pass them as "{table.fieldname}": [{{{example}}}]'
+				f"{', '.join(owned)} belong to the child table `{table_fieldname}` ({options}); "
+				f'pass them as "{table_fieldname}": [{{{example}}}]'
 			)
 			unknown = [key for key in unknown if key not in owned]
 	if not hints:

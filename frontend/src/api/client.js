@@ -6,10 +6,10 @@ function getList(doctype, options) {
 }
 
 export const loadAgents = () =>
-	getList("Flow Agent", { filters: { enabled: 1 }, fields: ["name", "title"], limit: 50 });
+	getList("Flow Agent", { filters: { enabled: 1 }, fields: ["name", "title", "model"], limit: 50 });
 
 export const loadModels = () =>
-	getList("Flow Model", { filters: { enabled: 1 }, fields: ["name", "title"], limit: 50 });
+	getList("Flow Model", { filters: { enabled: 1 }, fields: ["name", "title", "model_id", "params", "context_window"], limit: 50 });
 
 export const loadHistory = () =>
 	getList("Flow Session", {

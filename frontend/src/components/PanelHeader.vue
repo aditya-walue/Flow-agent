@@ -7,13 +7,20 @@ import { __ } from "@/lib/translate";
 
 const props = defineProps({ onToggleFullscreen: { type: Function, default: null } });
 const emit = defineEmits(["close"]);
-const { recentSessions, switchSession, newChat, fullscreen } = useStore();
+const { recentSessions, switchSession, newChat, fullscreen, modelLoadingStatus } = useStore();
 </script>
 
 <template>
 	<header class="flex items-center gap-1.5 border-b border-outline-gray-1 px-3 py-2">
 		<BrandMark :size="18" />
 		<span class="text-sm font-medium text-ink-gray-9">{{ __("Flow") }}</span>
+		<span
+			v-if="modelLoadingStatus"
+			class="flow-shimmer-text ml-2 max-w-[220px] truncate text-xs text-ink-gray-5"
+			:title="modelLoadingStatus"
+		>
+			{{ modelLoadingStatus }}
+		</span>
 		<span class="flex-1"></span>
 
 		<SessionsMenu :sessions="recentSessions" @select="switchSession" />

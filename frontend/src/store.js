@@ -35,6 +35,8 @@ const attachments = ref([]);
 const sending = ref(false);
 const loaded = ref(false);
 const fullscreen = ref(false);
+const modelLoadingStatus = ref("");
+const modelReady = ref(false);
 
 // Bumped whenever new content arrives / focus is wanted; views watch & react.
 const scrollTick = ref(0);
@@ -74,6 +76,9 @@ async function loadInitial() {
 		loaded.value = true;
 		focusTick.value++;
 
+		// Pre-initialize WebLLM once per active application session
+		initActiveBrowserModel();
+
 		if (readPanelState().open) await restoreSession();
 	} catch {
 		// `loaded` stays false, keeping the composer disabled on "Loading…".
@@ -81,6 +86,42 @@ async function loadInitial() {
 			message: __("Flow failed to load. Refresh the page to retry."),
 			indicator: "red",
 		});
+	}
+}
+
+function resolveActiveModelDoc() {
+	const agent = agents.value.find((a) => a.name === selectedAgent.value);
+	const modelName = selectedModel.value || agent?.model;
+	return models.value.find((m) => m.name === modelName);
+}
+
+// Initializing WebLLM once per active session rather than per message
+async function initActiveBrowserModel() {
+	const modelDoc = resolveActiveModelDoc();
+	if (!modelDoc || !modelDoc.model_id?.startsWith("webllm/")) {
+		modelLoadingStatus.value = "";
+		modelReady.value = true;
+		return;
+	}
+	const model = modelDoc.model_id.split("/", 2)[1];
+	let contextWindow = 16384;
+	if (modelDoc.context_window) {
+		contextWindow = modelDoc.context_window;
+	} else if (modelDoc.params) {
+		try {
+			const p = typeof modelDoc.params === "string" ? JSON.parse(modelDoc.params) : modelDoc.params;
+			if (p?.context_window_size) contextWindow = p.context_window_size;
+		} catch {}
+	}
+	try {
+		await preloadModel({ model, context_window_size: contextWindow }, (status) => {
+			modelLoadingStatus.value = status;
+		});
+		modelReady.value = true;
+	} catch (e) {
+		console.warn("Flow: could not pre-initialize WebLLM session model", e);
+	} finally {
+		modelLoadingStatus.value = "";
 	}
 }
 
@@ -129,9 +170,11 @@ function setAgent(name) {
 	selectedAgent.value = name;
 	writeLastAgent(name);
 	loadToolApproval(name);
+	initActiveBrowserModel();
 }
 function setModel(name) {
 	selectedModel.value = name;
+	initActiveBrowserModel();
 }
 
 // ── conversation control ──────────────────────────────────────────────────────
@@ -286,11 +329,14 @@ async function restorePausedRun(session) {
 // ── sending / streaming ────────────────────────────────────────────────────────
 // Aborts the in-flight stream when the user stops the response.
 let abortController = null;
+let sendInProgress = false;
 
 async function send(text) {
-	text = text.trim();
-	if (!text || sending.value || paused.value || uploading.value) return;
+	text = (text || "").trim();
+	if (!text || sending.value || sendInProgress || paused.value || uploading.value) return;
 
+	sendInProgress = true;
+	sending.value = true;
 	const ready = attachments.value.filter((a) => a.status === "ready");
 	const files = ready.map((a) => a.file);
 	const chips = ready.map((a) => ({ file_name: a.file_name, file_size: a.file_size }));
@@ -298,7 +344,6 @@ async function send(text) {
 
 	messages.value.push({ id: nextId(), role: "user", content: text, attachments: chips });
 	const assistant = pushAssistant();
-	sending.value = true;
 	abortController = new AbortController();
 	requestScroll(true);
 
@@ -320,21 +365,25 @@ async function send(text) {
 		else failMessage(assistant, e);
 	} finally {
 		abortController = null;
+		sendInProgress = false;
 		sending.value = false;
 		requestScroll();
 		focusTick.value++;
 	}
 }
 
+let resumeInProgress = false;
+
 async function resume(answers, pausedMsg) {
 	const rn = pausedMsg?.runName || runName.value;
-	if (!rn) return;
+	if (!rn || sending.value || resumeInProgress) return;
 
+	resumeInProgress = true;
+	sending.value = true;
 	// Stream the resumed turn into the same message so the whole run stays one block
 	// (matches how a reload reconstructs it) instead of splitting at each approval.
 	pausedMsg.questions = [];
 	pausedMsg.pending = true;
-	sending.value = true;
 	abortController = new AbortController();
 	requestScroll(true);
 
@@ -349,6 +398,7 @@ async function resume(answers, pausedMsg) {
 		else failMessage(pausedMsg, e);
 	} finally {
 		abortController = null;
+		resumeInProgress = false;
 		sending.value = false;
 		requestScroll();
 		focusTick.value++;
@@ -468,13 +518,19 @@ async function handleBrowserRequest(request, msg, signal) {
 				appendText(msg, delta);
 				requestScroll();
 			},
-			onStatus: (status) => (msg.status = status),
+			onStatus: (status) => {
+				msg.status = status;
+				modelLoadingStatus.value = status;
+			},
 			signal,
 		});
 		reply = { content: result.content, usage: result.usage };
 	} catch (e) {
 		msg.status = "";
+		modelLoadingStatus.value = "";
 		reply = { error: e.name === "AbortError" ? __("Stopped by user.") : e.message || String(e) };
+	} finally {
+		modelLoadingStatus.value = "";
 	}
 	await api.submitBrowserReply({ request_id: request.id, ...reply }).catch(() => {});
 }
@@ -590,6 +646,8 @@ export function useStore() {
 		sending,
 		loaded,
 		fullscreen,
+		modelLoadingStatus,
+		modelReady,
 		toolApproval,
 		scrollTick,
 		forceScroll,

@@ -593,18 +593,31 @@ METADATA_TOOLS = frozenset({"find_doctypes", "describe", "creation_steps"})
 
 # Tools a request needs, by what it asks for (matched on the latest user message). The final-answer
 # tools mostly run through exact routes; these let the model reach them for looser phrasings.
+# Groups are ordered from specific to general so Qwen receives focused, non-overlapping tools.
 TOOL_GROUPS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = tuple(
 	(re.compile(pattern, re.IGNORECASE), tools)
 	for pattern, tools in (
+		# Diagnose
 		(r"\b(error|exception|traceback|fail(s|ed|ing)?|not working|can'?t|cannot|won'?t|issue|problem|wrong)\b", ("error_diagnosis",)),
+		# How-to guides: specific workflows
+		(r"\b(assign|link|attach|allocat\w*)\b", ("assignment_steps", "explain_doctype")),
+		(r"\b(how\b.*\b(mark|status|paid|submit|cancel|close)|mark\b.*\b(paid|status))\b", ("status_steps", "document_flow")),
+		(r"\b(how\b.*\b(create|add|make|new)|steps?\b.*\b(create|add|new))\b", ("creation_steps", "required_values")),
+		(r"\b(how (do|to|can|should)|steps?|guide|procedure)\b", ("creation_steps", "document_flow")),
+		# Explain: roles and permissions
+		(r"\b(role|roles|permission|permissions|access rights?|privilege)\b", ("role_permissions", "explain_doctype")),
+		# Explain: document workflow & lifecycle
+		(r"\b(after|next|process|flow|workflow|approv\w*|cycle|stage)\b", ("document_flow", "explain_doctype")),
+		# Explain: DocType definition
+		(r"\b(what (is|are|does)|explain|mean(s|ing)?|define|difference|purpose)\b", ("explain_doctype", "document_flow")),
+		# Write tools: create and update
 		(r"\b(create|add|make|new|register|enter|record a)\b", ("create", "required_values", "find_doctypes")),
 		(r"\b(update|change|set|mark|close|rename|edit|modify)\b", ("update", "show_records", "find_doctypes")),
-		(r"\b(how (do|to|can|should)|steps?|guide|procedure)\b", ("creation_steps", "document_flow")),
-		(r"\b(what (is|are|does)|explain|mean(s|ing)?|define|difference|purpose)\b", ("explain_doctype", "document_flow")),
-		(r"\b(after|next|process|flow|workflow|approv\w*|cycle|stage)\b", ("document_flow",)),
+		# Records: count
+		(r"\b(how many|count|number of)\b", ("count", "show_records")),
 	)
 )
-# Looking things up is the most common need, and what the model falls back on.
+# Looking things up is what the model falls back on when no specific intent matched.
 DEFAULT_TOOLS = ("show_records", "count", "read", "find_doctypes")
 MAX_TOOLS = 6
 # Always offered beside the chosen tools: the fallback when none of them can answer.
@@ -622,13 +635,16 @@ def _relevant_tools(
 	for pattern, tools in TOOL_GROUPS:
 		if pattern.search(text):
 			wanted.extend(tools)
-	wanted.extend(DEFAULT_TOOLS)
+			break
+	if not wanted:
+		wanted.extend(DEFAULT_TOOLS)
 	# Tools already used this turn stay available, so a follow-up step can reuse them.
 	turn_start = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=0)
 	for m in messages[turn_start:]:
 		for tc in m.get("tool_calls") or []:
 			wanted.insert(0, tc["function"]["name"])
-	by_name = {t["function"]["name"]: t for t in tool_schemas}
+	# small_talk is a route-only tool; never offer it to the model.
+	by_name = {t["function"]["name"]: t for t in tool_schemas if t["function"]["name"] != "small_talk"}
 	chosen = [by_name[n] for n in dict.fromkeys(wanted) if n in by_name][:MAX_TOOLS]
 	chosen += [by_name[n] for n in FALLBACK_TOOLS if n in by_name and by_name[n] not in chosen]
 	return chosen or tool_schemas

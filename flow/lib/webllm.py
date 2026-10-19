@@ -35,6 +35,7 @@ BROWSER_PROVIDER = "webllm"
 INVALID_CALL = "invalid_tool_call"
 # Keep in sync with DEFAULT_CONTEXT_WINDOW in frontend/src/lib/webllm.js.
 DEFAULT_CONTEXT_WINDOW = 16384
+MAX_BROWSER_TOOL_RESULT = 3000
 
 # The first call in a browser downloads the model weights (GBs), so allow minutes.
 REPLY_TIMEOUT = 900
@@ -232,7 +233,10 @@ def to_plain_messages(
 		elif role == "tool" and message.get("tool_call_id") in malformed:
 			add("user", f"(Your last tool call could not be read: {_error_text(content)})")
 		elif role == "tool":
-			add("user", f"Tool result:\n{content}" if strict else f"<tool_response>\n{content}\n</tool_response>")
+			tool_res = content
+			if len(tool_res) > MAX_BROWSER_TOOL_RESULT:
+				tool_res = tool_res[:MAX_BROWSER_TOOL_RESULT] + "\n...(truncated)"
+			add("user", f"Tool result:\n{tool_res}" if strict else f"<tool_response>\n{tool_res}\n</tool_response>")
 
 	if tools:
 		system_parts.append(_strict_tools_prompt(tools) if strict else _tools_prompt(tools))
@@ -419,14 +423,26 @@ def _render_call(name: str, arguments: dict[str, Any], strict: bool) -> str:
 
 
 def _strict_tools_prompt(tools: list[dict[str, Any]]) -> str:
-	lines = "\n".join(
-		f"- {t['function']['name']}: {t['function'].get('description', '').strip()} "
-		f"Arguments: {json.dumps(t['function'].get('parameters', {}).get('properties', {}))}"
-		for t in tools
-	)
+	lines = []
+	for t in tools:
+		fn = t["function"]
+		name = fn["name"]
+		desc = fn.get("description", "").strip()
+		desc = desc.split("\n\n")[0].split("\n")[0].strip()
+		params = fn.get("parameters") or {}
+		props = params.get("properties") or {}
+		trimmed_props = {}
+		for k, v in props.items():
+			prop_copy = dict(v)
+			if "description" in prop_copy and isinstance(prop_copy["description"], str):
+				prop_copy["description"] = prop_copy["description"].split(".")[0].strip()
+			trimmed_props[k] = prop_copy
+		req = params.get("required") or []
+		req_suffix = f" Required: {json.dumps(req)}" if req else ""
+		lines.append(f"- {name}: {desc} Arguments: {json.dumps(trimmed_props)}{req_suffix}")
 	return (
 		"# Tools\n\n"
-		f"{lines}\n\n"
+		f"{chr(10).join(lines)}\n\n"
 		"Answer with exactly one JSON object:\n"
 		'- to use a tool: {"tool": "<name>", "arguments": {...}}\n'
 		'- to answer the user: {"reply": "<your answer>"}\n'

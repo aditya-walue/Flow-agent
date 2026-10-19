@@ -31,6 +31,10 @@ from flow.lib.tool import tool
 # builtins imports this module to register its tools, so its helpers are imported inside the
 # functions below rather than at the top (which would be circular).
 DocTypeArg = Annotated[str, 'Exact DocType name, e.g. "Sales Invoice", "Customer", "Item".']
+FiltersArg = Annotated[
+	dict[str, Any] | None,
+	'Field equality or range conditions as a JSON object, e.g. {"status": "Paid"}. Omit for all records.',
+]
 
 
 def _builtins():
@@ -118,6 +122,9 @@ def _doctypes_for_series(record_id: str) -> list[str]:
 	if not prefix or len(prefix.group(1)) < 3:
 		return []
 	stem = re.split(r"[-./]\d", record_id)[0].split(".")[0]
+	cache = frappe.flags.flow_series_doctypes = getattr(frappe.flags, "flow_series_doctypes", None) or {}
+	if stem in cache:
+		return cache[stem]
 	like = ["like", f"%{stem}%"]
 	doctypes = frappe.get_all("DocField", filters={"fieldname": "naming_series", "options": like}, pluck="parent")
 	doctypes += frappe.get_all(
@@ -125,7 +132,9 @@ def _doctypes_for_series(record_id: str) -> list[str]:
 		filters={"field_name": "naming_series", "property": "options", "value": like},
 		pluck="doc_type",
 	)
-	return list(dict.fromkeys(doctypes))
+	res = list(dict.fromkeys(doctypes))
+	cache[stem] = res
+	return res
 
 
 def _list_arguments(rest: str, order: str | None) -> dict[str, Any] | None:
@@ -225,7 +234,9 @@ def _scope(words: str) -> set[str] | None:
 	wanted = " ".join(words.lower().split())
 	if not wanted:
 		return None
-	modules = {m.lower(): m for m in frappe.get_all("Module Def", pluck="name")}
+	modules = getattr(frappe.flags, "flow_all_modules", None)
+	if modules is None:
+		modules = frappe.flags.flow_all_modules = {m.lower(): m for m in frappe.get_all("Module Def", pluck="name")}
 	if wanted in modules:
 		return {wanted}
 	for app in frappe.get_installed_apps():
@@ -323,13 +334,15 @@ def _status_value(doctype: str, word: str) -> str | None:
 def show_records(
 	doctype: DocTypeArg,
 	names: Annotated[list[str] | None, "Record IDs; omit for a recent list."] = None,
-	filters: Annotated[dict | None, 'e.g. {"status": "Open"}.'] = None,
+	filters: FiltersArg = None,
 	order_by: Annotated[str | None, 'e.g. "creation desc".'] = None,
 	about: Annotated[list[str] | None, 'Fieldnames the user asked about for one record, e.g. ["total_taxes_and_charges", "taxes"].'] = None,
 	limit: Annotated[int | None, f"How many records to list, up to {LIST_ALL_LIMIT}. Default 20; when the user wants all of them, pass the total count."] = None,
+	start: Annotated[int, "Offset for pagination (number of records to skip). Default 0."] = 0,
 ) -> dict[str, Any]:
 	"""Show records (by ID, or a recent list) with key fields, plus the fields the user asked
-	about for a single record. Shown to the user directly."""
+	about for a single record. Shown to the user directly. Use whenever the user asks to see,
+	view, or list records."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	route = doctype.lower().replace(" ", "-")
@@ -340,11 +353,19 @@ def show_records(
 	conditions = dict(filters or {})
 	if names:
 		conditions["name"] = ["in", names]
+	limit_val = min(int(limit), LIST_ALL_LIMIT) if limit else LIST_LIMIT
+	start_val = max(int(start or 0), 0)
 	rows = frappe.get_list(
 		doctype, filters=conditions, fields=columns, order_by=order_by or "creation desc",
-		limit=min(int(limit), LIST_ALL_LIMIT) if limit else LIST_LIMIT,
+		limit=limit_val,
+		start=start_val,
 	)
-	total = frappe.db.count(doctype, conditions) if not names else len(rows)
+	if names:
+		total = len(rows)
+	elif start_val == 0 and len(rows) < limit_val:
+		total = len(rows)
+	else:
+		total = frappe.db.count(doctype, conditions)
 	meta = frappe.get_meta(doctype)
 	labels = {c: (meta.get_field(c).label if meta.get_field(c) else c.replace("_", " ").title()) for c in columns}
 
@@ -375,7 +396,14 @@ def show_records(
 	]
 	qualifier = " ".join(f"{k} = {v}" for k, v in (filters or {}).items())
 	title = f"**{total} {doctype} record{'s' if total != 1 else ''}**" + (f" ({qualifier})" if qualifier else "")
-	more = f"\n\nShowing the latest {len(rows)}." if total > len(rows) else ""
+	if start_val > 0:
+		start_idx = start_val + 1
+		end_idx = start_val + len(rows)
+		more = f"\n\nShowing records {start_idx} to {end_idx} of {total}."
+	elif total > len(rows):
+		more = f"\n\nShowing the latest {len(rows)}."
+	else:
+		more = ""
 	return {
 		"answer": f"{title}:\n\n{header}\n{sep}\n" + "\n".join(body) + more,
 		"doctype": doctype,
@@ -932,9 +960,39 @@ def asked_fields(doctype: str, text: str, exclude: str = "", record: str | None 
 		else:
 			tiers.append([(coverage, matched), [fieldname]])
 	if record:
-		doc = frappe.get_doc(doctype, record)
+		scalar_candidates = [
+			n for _, names in tiers for n in names
+			if meta.get_field(n) and meta.get_field(n).fieldtype not in ("Table", "Table MultiSelect")
+		]
+		scalar_vals: dict[str, Any] = {}
+		if scalar_candidates:
+			val = frappe.db.get_value(doctype, record, scalar_candidates, as_dict=True)
+			if val:
+				scalar_vals = dict(val)
 		for _, names in tiers:
-			if any(_has_value(doc, meta.get_field(n)) for n in names):
+			found = False
+			for n in names:
+				f = meta.get_field(n)
+				if not f:
+					continue
+				if f.fieldtype in ("Table", "Table MultiSelect"):
+					if f.options and frappe.db.exists(f.options, {"parent": record, "parenttype": doctype, "parentfield": n}):
+						found = True
+						break
+				else:
+					v = scalar_vals.get(n)
+					if f.fieldtype in ("Currency", "Float", "Int", "Percent"):
+						if v is not None:
+							found = True
+							break
+					elif f.fieldtype == "Check":
+						if bool(v):
+							found = True
+							break
+					elif v not in (None, ""):
+						found = True
+						break
+			if found:
 				return names[: ASKED_FIELDS_LIMIT * 2]
 	return tiers[0][1][: ASKED_FIELDS_LIMIT * 2]
 
@@ -955,27 +1013,55 @@ def _asked_values(doctype: str, name: str, fieldnames: list[str]) -> list[str]:
 	a small table for child tables (their list-view columns)."""
 	if not fieldnames:
 		return []
-	doc = frappe.get_doc(doctype, name)
+	meta = frappe.get_meta(doctype)
+	table_fields = []
+	scalar_fields = []
+	for fn in fieldnames:
+		field = meta.get_field(fn)
+		if not field:
+			continue
+		if field.fieldtype in ("Table", "Table MultiSelect"):
+			table_fields.append(fn)
+		else:
+			scalar_fields.append(fn)
+
+	scalar_values: dict[str, Any] = {}
+	if scalar_fields:
+		val = frappe.db.get_value(doctype, name, scalar_fields, as_dict=True)
+		if val:
+			scalar_values = dict(val)
+
 	lines = []
 	for fieldname in fieldnames:
-		field = doc.meta.get_field(fieldname)
-		value = doc.get(fieldname)
+		field = meta.get_field(fieldname)
+		if not field:
+			continue
 		if field.fieldtype in ("Table", "Table MultiSelect"):
-			rows = value or []
-			if not rows:
+			if not field.options:
 				continue
 			child = frappe.get_meta(field.options)
 			cols = [c for c in child.fields if c.in_list_view and c.fieldtype not in _builtins().LAYOUT_FIELDTYPES][:4]
 			if not cols:
 				continue
+			col_names = [c.fieldname for c in cols]
+			rows = frappe.get_all(
+				field.options,
+				filters={"parent": name, "parenttype": doctype, "parentfield": fieldname},
+				fields=col_names,
+				order_by="idx asc",
+			)
+			if not rows:
+				continue
 			lines += [f"**{field.label}**:", "", "| " + " | ".join(c.label for c in cols) + " |", "|---" * len(cols) + "|"]
 			lines += ["| " + " | ".join(_fmt(r.get(c.fieldname)) for c in cols) + " |" for r in rows]
 			lines.append("")
-		elif field.fieldtype in ("Currency", "Float", "Int", "Percent") and value is not None:
-			# An amount of 0 answers the question ("no tax"), unlike an empty text field.
-			lines.append(f"- **{field.label}**: {_fmt(value)}")
-		elif value not in (None, "") and not (field.fieldtype == "Check" and not value):
-			lines.append(f"- **{field.label}**: {_fmt(value)}")
+		else:
+			value = scalar_values.get(fieldname)
+			if field.fieldtype in ("Currency", "Float", "Int", "Percent") and value is not None:
+				# An amount of 0 answers the question ("no tax"), unlike an empty text field.
+				lines.append(f"- **{field.label}**: {_fmt(value)}")
+			elif value not in (None, "") and not (field.fieldtype == "Check" and not value):
+				lines.append(f"- **{field.label}**: {_fmt(value)}")
 		if len(lines) >= ASKED_FIELDS_LIMIT * 4:
 			break
 	return lines
@@ -1005,7 +1091,8 @@ def role_permissions(
 		f for f in frappe.get_meta("DocPerm").fields
 		if f.fieldtype == "Check" and f.fieldname not in ("if_owner",) and f.label
 	]
-	rows = _role_rules(role, doctype)
+	needed_fields = ["parent", *(f.fieldname for f in rights)]
+	rows = _role_rules(role, doctype, fields=needed_fields)
 	lines = []
 	if rows:
 		title = f"**{role}** can currently:" if not doctype else f"**{role}** on **{doctype}** can currently:"
@@ -1031,17 +1118,20 @@ def role_permissions(
 	return {"answer": "\n".join(lines), "role": role, "doctype": doctype}
 
 
-def _role_rules(role: str, doctype: str | None) -> dict[str, dict[str, Any]]:
+def _role_rules(role: str, doctype: str | None, fields: list[str] | None = None) -> dict[str, dict[str, Any]]:
 	"""{DocType: rule} for the role at permission level 0. A DocType's customised rules (Custom
 	DocPerm) replace its standard ones (DocPerm), as Frappe applies them."""
 	filters: dict[str, Any] = {"role": role, "permlevel": 0}
+	custom_filters: dict[str, Any] = {}
 	if doctype:
 		filters["parent"] = doctype
+		custom_filters["parent"] = doctype
 	rules: dict[str, dict[str, Any]] = {}
-	customised = set(frappe.get_all("Custom DocPerm", pluck="parent", distinct=True))
-	for row in frappe.get_all("Custom DocPerm", filters=filters, fields=["*"], order_by="parent"):
+	query_fields = fields or ["*"]
+	customised = set(frappe.get_all("Custom DocPerm", filters=custom_filters or None, pluck="parent", distinct=True))
+	for row in frappe.get_all("Custom DocPerm", filters=filters, fields=query_fields, order_by="parent"):
 		rules[row.parent] = row
-	for row in frappe.get_all("DocPerm", filters=filters, fields=["*"], order_by="parent"):
+	for row in frappe.get_all("DocPerm", filters=filters, fields=query_fields, order_by="parent"):
 		if row.parent not in customised:
 			rules.setdefault(row.parent, row)
 	return dict(sorted(rules.items()))

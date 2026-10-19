@@ -808,11 +808,21 @@ class TestBrowserModelContext(UnitTestCase):
 	def test_tools_follow_the_request(self):
 		from flow.lib.agent import _relevant_tools
 
-		schemas = self._schemas("show_records", "count", "read", "find_doctypes", "create", "required_values", "error_diagnosis", "document_flow")
+		schemas = self._schemas(
+			"show_records", "count", "read", "find_doctypes", "create", "required_values",
+			"error_diagnosis", "document_flow", "assignment_steps", "status_steps",
+			"role_permissions", "explain_doctype", "creation_steps", "small_talk",
+		)
 		pick = lambda text: [t["function"]["name"] for t in _relevant_tools([{"role": "user", "content": text}], schemas)]  # noqa: E731
 		self.assertEqual(pick("show me the invoices"), ["show_records", "count", "read", "find_doctypes"])
 		self.assertEqual(pick("create a quotation")[:2], ["create", "required_values"])
-		self.assertEqual(pick("why does my invoice fail")[0], "error_diagnosis")
+		self.assertEqual(pick("why does my invoice fail"), ["error_diagnosis"])
+		self.assertEqual(pick("how to assign roles to users"), ["assignment_steps", "explain_doctype"])
+		self.assertEqual(pick("how do I mark this invoice as paid"), ["status_steps", "document_flow"])
+		self.assertEqual(pick("what permissions does Sales User have"), ["role_permissions", "explain_doctype"])
+		self.assertEqual(pick("how many customers exist"), ["count", "show_records"])
+		# small_talk is never offered to the model
+		self.assertNotIn("small_talk", pick("hello there"))
 
 	def test_tools_used_this_turn_stay_available(self):
 		from flow.lib.agent import _relevant_tools
