@@ -333,6 +333,8 @@ def show_records(
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	route = doctype.lower().replace(" ", "-")
+	if frappe.get_meta(doctype).issingle:
+		return {"answer": f"**{doctype}** is a single settings page — [open it](/desk/{route}).", "doctype": doctype}
 	columns = _builtins()._key_columns(doctype)
 	filters = _tidy_filters(doctype, filters)
 	conditions = dict(filters or {})
@@ -436,8 +438,10 @@ def _route_explain_doctype(text: str) -> dict[str, Any] | None:
 
 @tool(final_answer=True, route=_route_explain_doctype)
 def explain_doctype(doctype: DocTypeArg) -> dict[str, Any]:
-	"""Explain what a DocType (record type) is: its module, purpose, lifecycle, main fields and
-	the records it links to, from the site's metadata. Shown to the user directly."""
+	"""Explain what one DocType (record type, e.g. "Sales Invoice") is: its module, purpose,
+	lifecycle, main fields and the records it links to, from the site's metadata. Shown to the
+	user directly. For a module, app or feature as a whole ("what is ERPNext manufacturing",
+	"how does payroll work") use frappe_docs instead."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	meta = frappe.get_meta(doctype)
@@ -461,9 +465,16 @@ def explain_doctype(doctype: DocTypeArg) -> dict[str, Any]:
 	links = list(dict.fromkeys(f.options for f in meta.fields if f.fieldtype == "Link" and f.reqd and f.options))
 	if links:
 		parts.append("It links to: " + ", ".join(links) + ".")
-	count = frappe.db.count(doctype) if frappe.has_permission(doctype, "read") else None
-	if count is not None:
-		parts.append(f"There {'is' if count == 1 else 'are'} {count} on this site — [open the list](/desk/{route}).")
+	if meta.issingle:
+		# A Single is one settings record with no table of its own: nothing to count.
+		parts.append(f"It is a single settings page, not a list of records — [open it](/desk/{route}).")
+	else:
+		try:
+			count = frappe.db.count(doctype)
+		except Exception:
+			count = None
+		if count is not None:
+			parts.append(f"There {'is' if count == 1 else 'are'} {count} on this site — [open the list](/desk/{route}).")
 	return {"answer": "\n\n".join(parts), "doctype": doctype}
 
 

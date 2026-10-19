@@ -563,6 +563,8 @@ def count(
 ) -> dict[str, Any]:
 	"""Count records ("how many"), optionally per value of one field ("leads by status"). Shown
 	to the user directly."""
+	if frappe.get_meta(doctype).issingle:
+		raise ValueError(f"{doctype} is a single settings page, not a list of records; there is nothing to count.")
 	if group_by:
 		return _grouped_count(doctype, filters, group_by)
 	rows = frappe.get_list(doctype, filters=filters, fields=[{"COUNT": "*", "as": "count"}])

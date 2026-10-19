@@ -254,3 +254,18 @@ class TestCountQuestions(IntegrationTestCase):
 		self.assertIn("core", _scope("frappe framework"))
 		self.assertEqual(_scope("core"), {"core"})
 		self.assertIsNone(_scope("the system"))
+
+
+class TestSingleDocTypes(IntegrationTestCase):
+	"""Singles (one settings record, no table) are explained and shown, never counted."""
+
+	def test_single_is_explained_not_counted(self):
+		from flow.tools.answers import explain_doctype, show_records
+		from flow.tools.builtins import count
+
+		answer = explain_doctype.func(doctype="System Settings")["answer"]
+		self.assertIn("single settings page", answer)
+		self.assertIn("single settings page", show_records.func(doctype="System Settings")["answer"])
+		with self.assertRaises(ValueError):
+			count.func(doctype="System Settings")
+
