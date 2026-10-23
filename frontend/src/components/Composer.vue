@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, nextTick } from "vue";
 import AttachmentChip from "./AttachmentChip.vue";
-import { Button, FeatherIcon } from "@/lib/ui";
+import { FeatherIcon } from "@/lib/ui";
 import { useStore } from "@/store";
 import { __ } from "@/lib/translate";
 
@@ -103,8 +103,8 @@ watch(focusTick, () => nextTick(() => el.value?.focus()));
 
 <template>
 	<div
-		class="flow-composer absolute inset-x-5 bottom-3.5 mx-auto flex max-w-3xl flex-col gap-1.5 rounded-xl border bg-surface-white px-2.5 py-2 shadow-sm transition-[border-color,background-color] focus-within:border-outline-gray-3"
-		:class="dragging ? 'border-outline-gray-4 bg-surface-gray-1' : 'border-outline-gray-2'"
+		class="flow-composer absolute inset-x-4 bottom-4 mx-auto flex max-w-3xl flex-col gap-1 px-3 pb-2.5 pt-2"
+		:class="{ 'flow-composer-drag': dragging }"
 		@dragover="onDragOver"
 		@dragleave="onDragLeave"
 		@drop="onDrop"
@@ -128,7 +128,7 @@ watch(focusTick, () => nextTick(() => el.value?.focus()));
 			rows="1"
 			:placeholder="placeholder"
 			:disabled="inputDisabled"
-			class="max-h-40 min-h-[50px] w-full resize-none border-0 bg-transparent text-base font-normal leading-relaxed text-ink-gray-9 outline-none placeholder:text-ink-gray-4"
+			class="max-h-40 min-h-[44px] w-full resize-none border-0 bg-transparent px-0.5 pt-1 text-base font-normal leading-relaxed tracking-tight text-ink-gray-9 outline-none placeholder:text-ink-gray-4"
 			@keydown="onKeydown"
 			@input="resize"
 		></textarea>
@@ -136,12 +136,12 @@ watch(focusTick, () => nextTick(() => el.value?.focus()));
 		<div class="flex items-center gap-1.5">
 			<!-- attach -->
 			<button
-				class="flex h-6 w-6 items-center justify-center rounded text-ink-gray-6 hover:bg-surface-gray-2 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+				class="flow-icon-btn"
 				:disabled="inputDisabled"
 				:title="__('Attach file')"
 				@click="pickFiles"
 			>
-				<FeatherIcon name="paperclip" class="h-3.5 w-3.5" />
+				<FeatherIcon name="paperclip" class="h-4 w-4" />
 			</button>
 			<input
 				ref="fileInput"
@@ -154,26 +154,25 @@ watch(focusTick, () => nextTick(() => el.value?.focus()));
 
 			<span class="flex-1"></span>
 
-			<Button
+			<button
 				v-if="sending"
-				theme="red"
-				class="!bg-surface-red-3 hover:!bg-surface-red-4"
+				class="flow-send is-stop"
 				:title="__('Stop')"
+				:aria-label="__('Stop')"
 				@click="stopRun"
 			>
-				<template #icon
-					><span class="h-2.5 w-2.5 rounded-[2px] bg-current"></span
-				></template>
-			</Button>
-			<Button
+				<span class="h-2.5 w-2.5 rounded-[2px] bg-current"></span>
+			</button>
+			<button
 				v-else
-				variant="solid"
+				class="flow-send"
 				:disabled="!canSend"
 				:title="__('Send')"
+				:aria-label="__('Send')"
 				@click="submit"
 			>
-				<template #icon><FeatherIcon name="arrow-up" class="h-4 w-4" /></template>
-			</Button>
+				<FeatherIcon name="arrow-up" :stroke-width="2.4" class="h-4 w-4" />
+			</button>
 		</div>
 	</div>
 </template>

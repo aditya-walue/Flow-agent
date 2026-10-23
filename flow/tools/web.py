@@ -37,10 +37,8 @@ QUERY_LIMIT = 200
 def web_search(
 	query: Annotated[str, 'Search words, e.g. "ERPNext give a role permission on a doctype". No record IDs or personal data.'],
 ) -> dict[str, Any]:
-	"""Search the public web when no other tool can answer: how something works in general,
-	what a concept means, steps documented online. Returns titles, links and snippets; answer
-	from them in your own words and name the source links. Use the site's own tools first for
-	anything about this site's data."""
+	"""Search the public web, only when no site tool or frappe_docs can answer. Answer from
+	the snippets in your own words and name the source links."""
 	if _turned_off():
 		raise ValueError("Web search is turned off on this site.")
 	query = " ".join(str(query or "").split())[:QUERY_LIMIT]
@@ -106,10 +104,9 @@ def _real_url(href: str) -> str:
 def frappe_docs(
 	query: Annotated[str, 'What to look up, e.g. "role permissions manager" or "make payment entry against sales invoice".'],
 ) -> dict[str, Any]:
-	"""Look something up in the official Frappe / ERPNext documentation (docs.frappe.io): how a
-	feature works, the steps to do something, what a setting means. Returns the best page's text
-	and links to other matching pages; answer from that text in your own words and give the page
-	link. Use the site's own tools first for anything about this site's data."""
+	"""Look up the official Frappe / ERPNext docs (docs.frappe.io): how a feature works, steps,
+	what a setting means. Answer from the returned text in your own words and give its page link.
+	Try the site's own tools first for anything about this site's data."""
 	if _turned_off():
 		raise ValueError("Looking things up online is turned off on this site.")
 	query = " ".join(str(query or "").split())[:QUERY_LIMIT]

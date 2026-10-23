@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import frappe
 from frappe import _
 
+from flow.lib import tracing
 from flow.lib.model import ChatResponse, Model, ToolCall, ToolCallBegin
 from flow.lib.tool import Tool
 
@@ -117,6 +118,9 @@ class Agent:
 		self.tools = list(tools or [])
 		# The desk page the user is on, {"doctype"[, "name"]}, set per turn by the session.
 		self.page: dict[str, str] | None = None
+		# Opik: the Flow Session and Flow Run a run belongs to, set per turn by the session.
+		self.trace_context: dict[str, str] = {}
+		self._trace: Any = tracing.NO_TRACE
 		if knowledge:
 			from flow.tools.builtins import bind_search_knowledge
 
@@ -249,6 +253,24 @@ class Agent:
 		*,
 		route: bool = False,
 	) -> RunResult:
+		self._begin_trace(messages)
+		try:
+			result = self._run_loop(messages, executed_calls, route=route)
+		except BaseException as e:
+			self._trace.fail(e)
+			raise
+		finally:
+			trace, self._trace = self._trace, tracing.NO_TRACE
+		trace.finish(result.output, metadata=_result_metadata(result))
+		return result
+
+	def _run_loop(
+		self,
+		messages: list[dict[str, Any]],
+		executed_calls: list[ToolCall] | None = None,
+		*,
+		route: bool = False,
+	) -> RunResult:
 		tool_schemas = [t.to_dict() for t in self.tools] or None
 		executed_calls = executed_calls if executed_calls is not None else []
 		usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -260,7 +282,13 @@ class Agent:
 				response, routed = routed, None
 			else:
 				context, tools = self._model_context(messages, tool_schemas)
-				response = self.model.chat(context, tools=tools)
+				started = tracing.now()
+				try:
+					response = self.model.chat(context, tools=tools)
+				except Exception as e:
+					self._trace_model(context, tools, None, started, error=e)
+					raise
+				self._trace_model(context, tools, response, started)
 			_accumulate_usage(usage_total, response.usage)
 			messages.append(_assistant_message(response))
 
@@ -322,6 +350,29 @@ class Agent:
 		raise RuntimeError(f"Agent {self.name!r} exceeded max_iterations ({self.max_iterations})")
 
 	def _loop_stream(
+		self,
+		messages: list[dict[str, Any]],
+		executed_calls: list[ToolCall] | None = None,
+		*,
+		route: bool = False,
+	) -> Generator[Event]:
+		self._begin_trace(messages)
+		finished = False
+		try:
+			for event in self._run_loop_stream(messages, executed_calls, route=route):
+				if isinstance(event, Done):
+					finished = True
+					self._trace.finish(event.result.output, metadata=_result_metadata(event.result))
+				yield event
+		except BaseException as e:
+			# GeneratorExit: the client went away mid-stream.
+			if not finished:
+				self._trace.fail(e)
+			raise
+		finally:
+			self._trace = tracing.NO_TRACE
+
+	def _run_loop_stream(
 		self,
 		messages: list[dict[str, Any]],
 		executed_calls: list[ToolCall] | None = None,
@@ -456,7 +507,12 @@ class Agent:
 		self, messages: list[dict[str, Any]], tool_schemas: list[dict[str, Any]] | None
 	) -> Generator[Event, None, ChatResponse]:
 		"""One streamed model call, relaying its events; returns the assembled response."""
-		chunks = self.model.chat(messages, tools=tool_schemas, stream=True)
+		started = tracing.now()
+		try:
+			chunks = self.model.chat(messages, tools=tool_schemas, stream=True)
+		except Exception as e:
+			self._trace_model(messages, tool_schemas, None, started, error=e)
+			raise
 		# Tool calls are announced mid-stream (ToolCallBegin) so the UI shows the tool the moment
 		# the model starts it, before its arguments finish streaming.
 		try:
@@ -470,7 +526,51 @@ class Agent:
 					# Browser-model hand-off (flow.lib.webllm): relayed to the client as-is.
 					yield item
 		except StopIteration as e:
+			self._trace_model(messages, tool_schemas, e.value, started)
 			return e.value
+		except Exception as e:
+			self._trace_model(messages, tool_schemas, None, started, error=e)
+			raise
+
+	def _begin_trace(self, messages: list[dict[str, Any]]) -> None:
+		"""Open the Opik trace for this run (a no-op unless tracing is on)."""
+		self._trace = tracing.start(
+			self.name,
+			input=list(messages),  # a copy: the loop appends to `messages` while the run goes on
+			thread_id=self.trace_context.get("session"),
+			metadata={
+				"model": getattr(self.model, "model_id", None),
+				"run": self.trace_context.get("run"),
+				"page": self.page,
+			},
+		)
+
+	def _trace_model(
+		self,
+		context: list[dict[str, Any]],
+		tools: list[dict[str, Any]] | None,
+		response: ChatResponse | None,
+		started: Any,
+		*,
+		error: BaseException | None = None,
+	) -> None:
+		model_id = getattr(self.model, "model_id", None)
+		from flow.lib.webllm import is_browser_model
+
+		usage = (response.usage if response else None) or {}
+		self._trace.span(
+			"model",
+			type="llm",
+			input={"messages": context},
+			output=response and {"content": response.content, "tool_calls": [c.name for c in response.tool_calls]},
+			started=started,
+			model=model_id,
+			provider="webllm" if is_browser_model(model_id) else None,
+			usage={k: v for k, v in usage.items() if isinstance(v, int)},
+			# The tools the model was offered: what to check when it picked the wrong one.
+			metadata={"tools_offered": [t["function"]["name"] for t in tools or []]},
+			error=error,
+		)
 
 	def _routed_response(self, messages: list[dict[str, Any]]) -> ChatResponse | None:
 		"""A tool call for a user message one of the tools unmistakably answers (see Tool.route),
@@ -493,11 +593,13 @@ class Agent:
 			if arguments and added_id and tool.name == "show_records" and not arguments.get("about"):
 				continue
 			if arguments:
+				self._trace_route("exact route", tool.name, arguments)
 				return _routed_call(tool.name, arguments)
 		# A question about the record the user has open ("how much tax is on this?"): the words
 		# that name its fields, read from that record's own labels, decide what to show.
 		on_page = self._open_record_answer(text)
 		if on_page:
+			self._trace_route("open record", on_page.tool_calls[0].name, on_page.tool_calls[0].arguments)
 			return on_page
 		# No exact route: let the optional Laya classifier pick a read-only tool when it's
 		# confident; it returns None (chat model as usual) when disabled, unsure or unavailable.
@@ -508,7 +610,13 @@ class Agent:
 		page_type = {"doctype": self.page["doctype"]} if (self.page or {}).get("doctype") else None
 		laya_text = _with_referenced_doctype(last["content"], messages, page_type)
 		laya = laya_router.route(laya_text, set(self._tools_by_name))
+		if laya:
+			self._trace_route("laya", *laya)
 		return _routed_call(*laya) if laya else None
+
+	def _trace_route(self, how: str, tool: str, arguments: dict[str, Any]) -> None:
+		"""A span for a tool picked without the chat model: which route chose it, and with what."""
+		self._trace.span(f"route: {how}", input={"tool": tool, "arguments": arguments}, started=tracing.now())
 
 	def _open_record_answer(self, text: str) -> ChatResponse | None:
 		"""show_records for the open record when the question names some of its fields and isn't
@@ -572,6 +680,7 @@ class Agent:
 		context = _grounding_text(messages) if messages is not None else None
 		problem = tool.precheck(call.arguments, context) if tool.precheck else None
 		if problem:
+			self._trace.span(call.name, type="tool", input=call.arguments, started=tracing.now(), error=problem)
 			return json.dumps({"error": problem})
 		if tool.requires_confirmation and not self.auto_approve:
 			return _confirmation_question(call, tool)
@@ -580,10 +689,14 @@ class Agent:
 	def _run_tool(self, call: ToolCall) -> Any:
 		"""Invoke the tool, returning its result or a serialized error message."""
 		tool = self._tools_by_name[call.name]
+		started = tracing.now()
 		try:
-			return tool(**call.arguments)
+			result = tool(**call.arguments)
 		except Exception as e:
+			self._trace.span(call.name, type="tool", input=call.arguments, started=started, error=e)
 			return json.dumps({"error": str(e)[:ERROR_MESSAGE_LIMIT]})
+		self._trace.span(call.name, type="tool", input=call.arguments, output=result, started=started)
+		return result
 
 
 # Tools that return schema and help text, not data: an option they list ("Gender: Male / Female
@@ -598,12 +711,11 @@ TOOL_GROUPS: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = tuple(
 	(re.compile(pattern, re.IGNORECASE), tools)
 	for pattern, tools in (
 		# Diagnose
-		(r"\b(error|exception|traceback|fail(s|ed|ing)?|not working|can'?t|cannot|won'?t|issue|problem|wrong)\b", ("error_diagnosis",)),
+		(r"\b(error|exception|traceback|fail(s|ed|ing)?|not working|(can'?t|cannot|won'?t|unable to)\s+(save|submit|create|cancel|open|login|log in|print))\b", ("error_diagnosis",)),
 		# How-to guides: specific workflows
 		(r"\b(assign|link|attach|allocat\w*)\b", ("assignment_steps", "explain_doctype")),
 		(r"\b(how\b.*\b(mark|status|paid|submit|cancel|close)|mark\b.*\b(paid|status))\b", ("status_steps", "document_flow")),
-		(r"\b(how\b.*\b(create|add|make|new)|steps?\b.*\b(create|add|new))\b", ("creation_steps", "required_values")),
-		(r"\b(how (do|to|can|should)|steps?|guide|procedure)\b", ("creation_steps", "document_flow")),
+		(r"\b(how (do|to|can|should)|steps?|guide|procedure)\b", ("frappe_docs",)),
 		# Explain: roles and permissions
 		(r"\b(role|roles|permission|permissions|access rights?|privilege)\b", ("role_permissions", "explain_doctype")),
 		# Explain: document workflow & lifecycle
@@ -745,6 +857,10 @@ def _serialize_tool_result(result: Any) -> str:
 		return json.dumps(result, default=str)
 	except (TypeError, ValueError):
 		return str(result)
+
+
+def _result_metadata(result: RunResult) -> dict[str, Any]:
+	return {"iterations": result.iterations, "usage": result.usage, "paused": result.paused}
 
 
 def _accumulate_usage(total: dict[str, int], delta: dict[str, int]) -> None:

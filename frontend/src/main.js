@@ -4,8 +4,14 @@ import { useStore } from "@/store";
 import { readPanelState, writePanelState } from "@/lib/panelState";
 import "@/index.css";
 
-const PANEL_WIDTH = 420;
-const MIN_WIDTH = 360;
+// Popup window: anchored bottom-right, never full height. "Full screen" is the expanded view.
+const POPUP_WIDTH = 404;
+const POPUP_HEIGHT = 640;
+const MIN_WIDTH = 340;
+const MIN_HEIGHT = 420;
+const EDGE = 24; // gap between the popup and the window edges
+const LAYOUT_VERSION = 2; // older saved states were a docked full-height sidebar
+const EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 
 // Same mark as BrandMark.vue; the launcher sits outside #flow-root, so no Vue/CSS here.
 const LAUNCHER_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -13,16 +19,18 @@ const LAUNCHER_ICON = `<svg width="24" height="24" viewBox="0 0 24 24" fill="cur
 	<path d="M18.5 14l.95 2.55L22 17.5l-2.55.95L18.5 21l-.95-2.55L15 17.5l2.55-.95L18.5 14z" />
 </svg>`;
 
-// Slide-in overlay panel injected into the Frappe desk. The Vue app (with real
+// Popup chat window injected into the Frappe desk. The Vue app (with real
 // frappe-ui components) mounts inside #flow-root; all bundle CSS is scoped to
 // that id so nothing leaks onto the desk.
 class FlowPanel {
 	constructor() {
 		const saved = readPanelState();
 		this.visible = Boolean(saved.open);
-		this._halfWidth = saved.width || PANEL_WIDTH;
-		// Fullscreen is the default mode; a saved preference wins on reload.
-		this._initialFullscreen = saved.fullscreen ?? true;
+		const current = saved.v === LAYOUT_VERSION;
+		this._width = (current && saved.width) || POPUP_WIDTH;
+		this._height = (current && saved.height) || POPUP_HEIGHT;
+		// The popup is the default; a saved full-screen preference wins on reload.
+		this._initialFullscreen = current ? Boolean(saved.fullscreen) : false;
 
 		this._mount();
 		this._addLauncher();
@@ -44,17 +52,13 @@ class FlowPanel {
 		this.root.id = "flow-root";
 		Object.assign(this.root.style, {
 			position: "fixed",
-			top: "0",
-			right: "0",
-			width: this.fullscreen ? "100vw" : `${this._halfWidth}px`,
-			height: "100vh",
 			zIndex: "1040",
-			// A restored-open panel renders in place (no slide) so a refresh is seamless.
-			transform: this.visible ? "translateX(0)" : "translateX(100%)",
-			transition: "transform 0.22s ease",
-			boxShadow: "-2px 0 16px rgba(0, 0, 0, 0.08)",
+			overflow: "hidden",
+			transformOrigin: "bottom right",
 		});
+		this._applyLayout(false);
 		document.body.appendChild(this.root);
+		window.addEventListener("resize", () => this._applyLayout(false));
 
 		this.app = createApp(App, {
 			onClose: () => this.hide(),
@@ -65,42 +69,63 @@ class FlowPanel {
 		this._addResizeHandle();
 	}
 
-	// Thin grab strip on the panel's left edge. Dragging it changes the panel
-	// width (anchored to the right). Appended after mount so Vue's render
-	// doesn't clobber it.
+	// Where the window sits: a bottom-right popup sized to the viewport, or the whole viewport.
+	// Sizes are clamped so a saved size never overflows a smaller window.
+	_applyLayout(animate = true) {
+		const style = this.root.style;
+		const full = this.fullscreen;
+		const maxWidth = window.innerWidth - EDGE * 2;
+		const maxHeight = window.innerHeight - EDGE * 2;
+		const width = Math.min(maxWidth, Math.max(MIN_WIDTH, this._width));
+		const height = Math.min(maxHeight, Math.max(MIN_HEIGHT, this._height));
+		const geometry = `width 0.26s ${EASE}, height 0.26s ${EASE}, right 0.26s ${EASE}, bottom 0.26s ${EASE}, border-radius 0.26s ${EASE}`;
+		const visibility = `opacity 0.18s ease, transform 0.24s ${EASE}, visibility 0s linear ${this.visible ? "0s" : "0.24s"}`;
+		style.transition = animate ? `${geometry}, ${visibility}` : visibility;
+		style.right = full ? "0" : `${EDGE}px`;
+		style.bottom = full ? "0" : `${EDGE}px`;
+		style.width = full ? "100vw" : `${width}px`;
+		style.height = full ? "100vh" : `${height}px`;
+		style.borderRadius = full ? "0" : "18px";
+		style.border = full ? "none" : "1px solid rgba(128, 128, 128, 0.22)";
+		style.boxShadow = full
+			? "none"
+			: "0 24px 64px -16px rgba(16, 24, 40, 0.32), 0 4px 14px rgba(16, 24, 40, 0.08)";
+		// Hidden: sunk toward the launcher, not clickable.
+		style.opacity = this.visible ? "1" : "0";
+		style.transform = this.visible ? "none" : "translateY(14px) scale(0.96)";
+		style.visibility = this.visible ? "visible" : "hidden";
+		style.pointerEvents = this.visible ? "auto" : "none";
+	}
+
+	// Grab area on the popup's top-left corner: dragging resizes it from there (the popup stays
+	// anchored bottom-right). Appended after mount so Vue's render doesn't clobber it.
 	_addResizeHandle() {
 		const handle = document.createElement("div");
 		Object.assign(handle.style, {
 			position: "absolute",
 			top: "0",
 			left: "0",
-			width: "6px",
-			height: "100%",
-			cursor: "ew-resize",
+			width: "18px",
+			height: "18px",
+			cursor: "nwse-resize",
 			zIndex: "10",
 		});
 		this.root.appendChild(handle);
 
 		const onMove = (e) => {
-			const max = window.innerWidth - 80;
-			const width = Math.min(max, Math.max(MIN_WIDTH, window.innerWidth - e.clientX));
-			this.root.style.width = `${width}px`;
-			this._halfWidth = width;
-			// A manual resize takes the panel out of fullscreen; keep the header icon honest.
-			this.store.fullscreen.value = false;
+			this._width = Math.min(window.innerWidth - EDGE * 2, Math.max(MIN_WIDTH, window.innerWidth - EDGE - e.clientX));
+			this._height = Math.min(window.innerHeight - EDGE * 2, Math.max(MIN_HEIGHT, window.innerHeight - EDGE - e.clientY));
+			this._applyLayout(false);
 		};
 		const onUp = () => {
 			document.removeEventListener("mousemove", onMove);
 			document.removeEventListener("mouseup", onUp);
 			document.body.style.userSelect = "";
-			this.root.style.transition = this._savedTransition;
 			this._persist();
 		};
 		handle.addEventListener("mousedown", (e) => {
+			if (this.fullscreen) return;
 			e.preventDefault();
-			// Drop the width transition while dragging so it tracks the cursor.
-			this._savedTransition = this.root.style.transition;
-			this.root.style.transition = "none";
 			document.body.style.userSelect = "none";
 			document.addEventListener("mousemove", onMove);
 			document.addEventListener("mouseup", onUp);
@@ -127,9 +152,9 @@ class FlowPanel {
 			display: "flex",
 			alignItems: "center",
 			justifyContent: "center",
-			background: "#171717",
+			background: "linear-gradient(155deg, #0f7b6c 0%, #0a6155 100%)",
 			color: "#ffffff",
-			boxShadow: "0 4px 14px rgba(0, 0, 0, 0.2)",
+			boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.16), 0 8px 22px -6px rgba(10, 97, 85, 0.55)",
 			cursor: "pointer",
 			zIndex: "1039",
 			transition: "transform 0.15s ease",
@@ -182,7 +207,7 @@ class FlowPanel {
 
 	_setVisible(visible) {
 		this.visible = visible;
-		this.root.style.transform = visible ? "translateX(0)" : "translateX(100%)";
+		this._applyLayout();
 		this._syncLauncher();
 	}
 
@@ -190,20 +215,21 @@ class FlowPanel {
 		this.visible ? this.hide() : this.show();
 	}
 
-	// Expand to the full viewport width, or restore the half-screen width. State
-	// lives in the store so the header icon tracks it reactively.
+	// Expand the popup to the full viewport, or shrink it back. State lives in the store so the
+	// header icon tracks it reactively.
 	toggleFullscreen() {
-		const next = !this.fullscreen;
-		this.store.fullscreen.value = next;
-		this.root.style.width = next ? "100vw" : `${this._halfWidth}px`;
+		this.store.fullscreen.value = !this.fullscreen;
+		this._applyLayout();
 		this._persist();
 	}
 
 	_persist() {
 		writePanelState({
 			open: this.visible,
+			v: LAYOUT_VERSION,
 			fullscreen: this.fullscreen,
-			width: this._halfWidth,
+			width: this._width,
+			height: this._height,
 			session: this.store.sessionName.value,
 		});
 	}

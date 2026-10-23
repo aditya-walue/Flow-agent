@@ -1,6 +1,12 @@
 <script setup>
 import BrandMark from "./BrandMark.vue";
+import { FeatherIcon } from "@/lib/ui";
+import { suggestedQuestions } from "@/lib/suggestions";
+import { useStore } from "@/store";
 import { __ } from "@/lib/translate";
+
+const { send } = useStore();
+const suggestions = suggestedQuestions();
 
 defineProps({
 	setup: { type: Boolean, default: false },
@@ -11,9 +17,9 @@ defineProps({
 
 <template>
 	<div
-		class="flex flex-1 flex-col items-center justify-center gap-2.5 text-center text-ink-gray-6"
+		class="flex flex-1 flex-col items-center justify-center gap-2.5 pb-6 text-center text-ink-gray-6"
 	>
-		<BrandMark :size="34" />
+		<BrandMark :size="44" class="mb-2" />
 
 		<template v-if="setup">
 			<div class="text-lg font-semibold text-ink-gray-9">
@@ -52,9 +58,22 @@ defineProps({
 		</template>
 
 		<template v-else>
-			<div class="text-lg font-semibold text-ink-gray-9">{{ __("Flow") }}</div>
-			<div class="max-w-[240px] text-xs leading-relaxed">
+			<div class="text-xl font-semibold tracking-tight text-ink-gray-9">
+				{{ __("What do you want to know?") }}
+			</div>
+			<div class="max-w-[260px] text-sm leading-relaxed text-ink-gray-6">
 				{{ __("Ask about your data, draft records, or run a task.") }}
+			</div>
+			<div v-if="suggestions.length" class="mt-4 flex w-full max-w-[340px] flex-col gap-0.5">
+				<button
+					v-for="s in suggestions"
+					:key="s.text"
+					class="flow-suggestion"
+					@click="send(s.text)"
+				>
+					<FeatherIcon :name="s.icon" class="h-4 w-4 shrink-0" />
+					<span class="truncate">{{ s.text }}</span>
+				</button>
 			</div>
 		</template>
 	</div>

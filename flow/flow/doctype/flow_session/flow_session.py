@@ -176,6 +176,7 @@ class FlowSession(Document):
 		self._runtime.auto_approve = auto_approve
 		# The desk page the user is on ({"doctype", "name"}), for "this invoice" and the model.
 		self._runtime.page = page
+		self._runtime.trace_context = {"session": self.name, "run": run.name}
 
 		# The update_memory tool reads this to stamp source_run. Scope tightly to the runtime
 		# call and clear after, so a stale run never leaks onto a later write in this request.
