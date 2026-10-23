@@ -399,6 +399,39 @@ def _log(text: str, decision: RouteDecision) -> None:
 		logger.exception("could not write Flow Route Log")
 
 
+def status() -> dict[str, Any]:
+	"""Why Laya is or isn't answering on this site: the settings it reads, whether its checkpoint
+	has loaded in this worker, and the last decisions logged. Never includes the token."""
+	path = frappe.conf.get("flow_laya_model_path")
+	out: dict[str, Any] = {
+		"enabled": enabled(),
+		"threshold": frappe.conf.get("flow_laya_threshold"),
+		"model_path": path,
+		"token_set": bool(_hf_token()),
+		"decisions_logged": frappe.db.count("Flow Route Log"),
+	}
+	try:
+		import onnxruntime
+
+		out["onnxruntime"] = onnxruntime.__version__
+	except Exception as e:
+		out["onnxruntime"] = f"missing: {type(e).__name__}"
+	if path:
+		key = f"finetuned:{path}"
+		state = _loading.get(key) or {}
+		out["onnx_checkpoint"] = _backends.get(key)
+		out["loaded_in_this_worker"] = key in _models
+		out["loading_error"] = state.get("error")
+	last = frappe.get_all(
+		"Flow Route Log",
+		fields=["creation", "outcome", "intent", "confidence", "reason", "error"],
+		order_by="creation desc",
+		limit=3,
+	)
+	out["last_decisions"] = [{**row, "creation": str(row.creation)} for row in last]
+	return out
+
+
 def metrics(days: int = 7) -> dict[str, Any]:
 	"""Laya decisions over the last `days`: how many were routed, fell back or errored, the
 	fallback rate, average confidence and latency, and the routed count per intent."""
