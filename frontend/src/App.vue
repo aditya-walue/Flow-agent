@@ -32,13 +32,17 @@ onUnmounted(() => observer?.disconnect());
 <template>
 	<div
 		ref="panel"
-		class="flow-panel relative flex h-full flex-col border-l border-outline-gray-2 bg-surface-white text-ink-gray-9"
+		class="flow-panel relative flex h-full flex-col bg-surface-white text-ink-gray-9"
 	>
 		<PanelHeader
 			:on-toggle-fullscreen="props.onToggleFullscreen"
 			@close="props.onClose && props.onClose()"
 		/>
 		<MessageList />
+		<div
+			class="flow-fade pointer-events-none absolute inset-x-0 bottom-0"
+			style="height: calc(var(--flow-composer-h, 104px) + 36px)"
+		></div>
 		<Composer ref="composer" />
 	</div>
 </template>

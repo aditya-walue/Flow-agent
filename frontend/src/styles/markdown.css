@@ -2,7 +2,8 @@
    utility classes on its elements). Scoped to #flow-root at build time. */
 .md {
 	font-size: var(--text-base);
-	line-height: 1.7;
+	line-height: 1.65;
+	letter-spacing: -0.006em;
 	color: var(--ink-gray-8);
 	word-break: break-word;
 }
@@ -23,7 +24,8 @@
 .md h6 {
 	margin: 14px 0 6px;
 	font-weight: var(--weight-semibold);
-	line-height: 1.35;
+	line-height: 1.3;
+	letter-spacing: -0.012em;
 	color: var(--ink-gray-9);
 }
 .md h1 {
@@ -43,18 +45,40 @@
 }
 .md ul,
 .md ol {
-	margin: 4px 0;
+	margin: 6px 0;
 	padding-left: 20px;
 }
+.md ul {
+	list-style: disc;
+}
+.md ol {
+	list-style: decimal;
+}
 .md li {
-	margin: 2px 0;
+	margin: 3px 0;
+	padding-left: 2px;
+}
+.md li::marker {
+	color: var(--ink-gray-4);
+}
+/* Links inside lists (record lists) read as items, not as a column of underlines. */
+.md li a {
+	text-decoration: none;
+	font-weight: var(--weight-medium);
+}
+.md li a:hover {
+	text-decoration: underline;
+	text-underline-offset: 3px;
 }
 .md a {
-	color: var(--ink-blue-link, var(--blue-600));
-	text-decoration: none;
+	color: var(--flow-accent);
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, var(--flow-accent) 35%, transparent);
+	text-decoration-thickness: 1px;
+	text-underline-offset: 3px;
 }
 .md a:hover {
-	text-decoration: underline;
+	text-decoration-color: currentColor;
 }
 .md strong {
 	font-weight: var(--weight-medium);
@@ -63,7 +87,7 @@
 .md blockquote {
 	margin: 8px 0;
 	padding: 2px 12px;
-	border-left: 3px solid var(--outline-gray-2);
+	border-left: 2px solid color-mix(in srgb, var(--flow-accent) 45%, var(--outline-gray-2));
 	color: var(--ink-gray-7);
 }
 .md hr {
@@ -79,10 +103,10 @@
 	border-radius: 5px;
 }
 .md pre {
-	background: var(--surface-gray-2);
-	border: 1px solid var(--outline-gray-1);
-	border-radius: 8px;
-	padding: 10px 12px;
+	background: var(--surface-gray-1);
+	border: 1px solid var(--outline-gray-2);
+	border-radius: 12px;
+	padding: 12px 14px;
 	overflow-x: auto;
 	margin: 8px 0;
 }
@@ -97,7 +121,7 @@
 	overflow-x: auto;
 	margin: 8px 0;
 	border: 1px solid var(--outline-gray-2);
-	border-radius: 8px;
+	border-radius: 12px;
 }
 .md table {
 	min-width: 100%;

@@ -22,6 +22,20 @@ class TestAnswerRoutes(IntegrationTestCase):
 	def tearDown(self):
 		frappe.db.rollback()
 
+	def test_doctype_word_is_not_guessed_as_a_record_id(self):
+		from flow.tools.builtins import _doctype_names
+
+		# A Role named like a DocType word ("Notification") must not turn a how-to question that
+		# mentions the type into a lookup of that Role.
+		word = next(
+			w.title()
+			for name in _doctype_names()
+			for w in name.split()
+			if len(w) >= 8 and w.isalpha() and not frappe.db.exists("Role", w.title())
+		)
+		frappe.get_doc({"doctype": "Role", "role_name": word}).insert()
+		self.assertIsNone(_route_show_records(f"how can i assign a role to a new {word.lower()}?"))
+
 	def test_record_by_id_and_lists_route(self):
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "answers probe"}).insert()
 		self.assertEqual(_route_show_records(f"show the details of todo {todo.name}"), {"doctype": "ToDo", "names": [todo.name]})

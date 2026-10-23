@@ -60,14 +60,9 @@ function sendOther() {
 </script>
 
 <template>
-	<div
-		class="rounded-lg border border-outline-gray-2 bg-surface-white p-2.5"
-		:class="{ 'opacity-70': answered }"
-	>
-		<div class="flex items-center gap-2">
-			<span
-				class="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-surface-gray-2 text-ink-gray-7"
-			>
+	<div class="flow-card p-3" :class="{ 'opacity-70': answered, 'is-danger': danger }">
+		<div class="flex items-center gap-2.5">
+			<span class="flow-tile">
 				<FeatherIcon :name="danger ? 'alert-triangle' : 'shield'" class="h-3.5 w-3.5" />
 			</span>
 			<div class="break-words text-sm font-medium leading-snug text-ink-gray-9">
@@ -95,6 +90,7 @@ function sendOther() {
 					:key="opt"
 					:variant="opt === 'Approve' ? 'solid' : 'outline'"
 					theme="gray"
+					:class="{ 'flow-approve': opt === 'Approve' }"
 					:label="optLabel(opt)"
 					@click="pick(opt)"
 				/>

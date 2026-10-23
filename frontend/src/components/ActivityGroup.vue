@@ -53,20 +53,22 @@ function toggle() {
 <template>
 	<div>
 		<button
-			class="flex items-center gap-1.5 text-sm transition-colors"
+			class="flow-activity"
 			:class="[
-				open ? 'font-medium text-ink-gray-8' : 'text-ink-gray-5',
+				open ? 'is-open' : '',
+				open ? 'font-medium text-ink-gray-8' : 'text-ink-gray-6',
 				expandable && !running && !open ? 'hover:text-ink-gray-7' : '',
 				expandable ? '' : 'cursor-default',
 			]"
 			@click="toggle"
 		>
+			<span class="flow-activity-dot" :class="{ 'is-live': shimmer }" aria-hidden="true"></span>
 			<ActivityLabel :text="summary" :active="shimmer" />
 			<span v-if="status" class="text-xs text-ink-gray-5">· {{ status }}</span>
 			<FeatherIcon
 				v-if="expandable"
 				name="chevron-right"
-				class="mt-0.5 h-3.5 w-3.5 shrink-0 transition-transform"
+				class="h-3.5 w-3.5 shrink-0 text-ink-gray-4 transition-transform"
 				:class="{ 'rotate-90': open }"
 			/>
 		</button>

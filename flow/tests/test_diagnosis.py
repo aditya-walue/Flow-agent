@@ -19,11 +19,51 @@ class TestErrorDiagnosis(IntegrationTestCase):
 		self.assertIn("frappe/frappe/desk/page/desktop/desktop.js", answer)
 		self.assertIn("**Where it comes from**", answer)
 
+	def test_finds_a_message_wrapped_in_the_users_own_words(self):
+		answer = error_diagnosis(
+			error="getting this error\nMessage\nIcon is not correctly configured please check the workspace sidebar to it"
+			" in the desk"
+		)["answer"]
+		self.assertIn("frappe/frappe/desk/page/desktop/desktop.js", answer)
+
 	def test_finds_a_templated_message_by_its_fixed_start(self):
 		answer = error_diagnosis(error="Could not find Row #1: Item: Some Unknown Item")["answer"]
 		self.assertIn("frappe/frappe/model/document.py", answer)
 		self.assertNotIn("```", answer)  # location only, never code
 		self.assertIn("doesn't exist", answer)
+
+	def test_finds_the_script_saved_on_the_site_that_raises_it(self):
+		message = "Quarterly figures are locked for editing"
+		script = frappe.get_doc(
+			{
+				"doctype": "Client Script",
+				"name": "diagnosis probe script",
+				"dt": "ToDo",
+				"view": "Form",
+				"enabled": 0,
+				"script": f'frappe.ui.form.on("ToDo", {{ refresh() {{ frappe.throw(__("{message}")); }} }});',
+			}
+		).insert()
+		answer = error_diagnosis(error=f"Message\n{message}")["answer"]
+		self.assertIn("Client Script", answer)
+		self.assertIn(script.name, answer)
+		self.assertNotIn("isn't in the installed apps", answer)
+
+	def test_translated_message_is_traced_to_its_english_source(self):
+		frappe.get_doc(
+			{
+				"doctype": "Translation",
+				"language": "fr",
+				"source_text": "Icon is not correctly configured please check the workspace sidebar to it",
+				"translated_text": "Icône mal configurée, vérifiez la barre latérale de l'espace de travail",
+			}
+		).insert()
+		answer = error_diagnosis(error="Icône mal configurée, vérifiez la barre latérale de l'espace de travail")["answer"]
+		self.assertIn("frappe/frappe/desk/page/desktop/desktop.js", answer)
+
+	def test_more_known_errors_get_a_cause(self):
+		answer = error_diagnosis(error="OperationalError: Lock wait timeout exceeded; try restarting transaction")["answer"]
+		self.assertIn("Retry in a minute", answer)
 
 	def test_traceback_names_the_missing_fields(self):
 		answer = error_diagnosis(

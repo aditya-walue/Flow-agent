@@ -77,14 +77,10 @@ def describe(
 		"A record ID, only to list that record's actions (submit, cancel, ...). Never the DocType name.",
 	] = None,
 ) -> dict[str, Any]:
-	"""Get a DocType's fields (fieldname, label, type, required, options), your permissions,
-	whether it is submittable, and its active workflow.
-
-	Use for internal model inspection before create/update to discover field names and types.
-	Does not guide the user (use creation_steps to explain how to create records in the Desk).
-	Link fields hold the name of a record of their `options` DocType; Table fields hold a list
-	of row objects of their `options` DocType. Does not return record values — use read.
-	"""
+	"""Fields of a DocType (fieldname, label, type, required, options), your permissions, whether it is
+	submittable and its workflow, so you can pick field names before create/update. Link fields hold the
+	name of a record of their `options` DocType; Table fields hold a list of row objects of it. Not for
+	values (use read) or user guides (use creation_steps)."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 
@@ -138,9 +134,8 @@ def read(
 	order_by: Annotated[str | None, 'e.g. "creation desc".'] = None,
 	start: Annotated[int, "Offset for pagination (number of records to skip). Default 0."] = 0,
 ) -> list[dict]:
-	"""Get specific field values of records, as data for you to use. For internal model reasoning
-	before taking action (e.g. checking values before an update); do not use to display lists to
-	the user (use show_records instead)."""
+	"""Field values of records, as data for you to reason over (e.g. before an update). Not for
+	showing lists to the user: use show_records."""
 	limit = min(max(int(limit), 1), MAX_READ_LIMIT)
 	start = max(int(start or 0), 0)
 	return frappe.get_list(
@@ -328,9 +323,8 @@ def small_talk(kind: Annotated[str, '"greeting" or "thanks".'] = "greeting") -> 
 
 @tool(final_answer=True, route=lambda text: _route_required_values(text))
 def required_values(doctype: DocTypeArg) -> dict[str, Any]:
-	"""Ask the user for the values needed to create a record of a DocType, with an example line
-	they can fill in. Use when the user wants to create a record but hasn't given the values.
-	"""
+	"""Ask for the values needed to create a record of a DocType, with an example line to fill
+	in. Use when the user wants to create one but gave no values."""
 	if not frappe.has_permission(doctype, "create"):
 		raise PermissionError(f"No permission to create {doctype}")
 	meta = frappe.get_meta(doctype)
@@ -365,12 +359,9 @@ def required_values(doctype: DocTypeArg) -> dict[str, Any]:
 
 @tool(final_answer=True, route=lambda text: _route_creation_steps(text))
 def creation_steps(doctype: DocTypeArg) -> dict[str, Any]:
-	"""Step-by-step guide for creating a NEW record of a DocType by hand in the desk, built from
-	this site's real required fields. Use only when the user asks how to create or add a new
-	record of that type. Not for other tasks (assigning, linking, approving, changing a status)
-	and not to explain an earlier answer step by step — answer those from that answer or the
-	matching tool. The guide is shown to the user directly. Does not create anything.
-	"""
+	"""Steps to create a NEW record of a DocType by hand in the desk, from this site's required
+	fields. Use for "how do I create/add a <DocType>". Not for assigning, linking, status changes or
+	other how-tos, and not to re-explain an earlier answer. Creates nothing."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	meta = frappe.get_meta(doctype)
@@ -581,8 +572,7 @@ def count(
 	filters: FiltersArg = None,
 	group_by: Annotated[str | None, 'Fieldname to count per value ("stage wise", "by status"), e.g. "status". Omit for one total.'] = None,
 ) -> dict[str, Any]:
-	"""Count records ("how many"), optionally per value of one field ("leads by status"). Shown
-	to the user directly."""
+	"""Count records ("how many"), optionally per value of one field ("leads by status")."""
 	if frappe.get_meta(doctype).issingle:
 		raise ValueError(f"{doctype} is a single settings page, not a list of records; there is nothing to count.")
 	if group_by:

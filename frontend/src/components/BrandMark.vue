@@ -4,12 +4,16 @@ defineProps({ size: { type: Number, default: 18 } });
 
 <template>
 	<span
-		class="inline-flex shrink-0 items-center justify-center rounded-md bg-surface-gray-7 text-ink-white"
-		:style="{ width: `${size}px`, height: `${size}px` }"
+		class="flow-brand inline-flex shrink-0 items-center justify-center"
+		:style="{
+			width: `${size}px`,
+			height: `${size}px`,
+			borderRadius: `${Math.round(size * 0.32)}px`,
+		}"
 	>
 		<svg
-			:width="size * 0.62"
-			:height="size * 0.62"
+			:width="size * 0.6"
+			:height="size * 0.6"
 			viewBox="0 0 24 24"
 			fill="currentColor"
 			aria-hidden="true"

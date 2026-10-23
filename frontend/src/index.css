@@ -11,6 +11,19 @@
 	--text-sm: 14px;
 	--text-base: 15px;
 	--text-lg: 17px;
+
+	/* One accent, used for the mark, the send button, focus and approvals; everything else
+	   stays on the desk's own gray tokens so the panel follows light/dark. */
+	--flow-accent: #0f7b6c;
+	--flow-accent-strong: #0a6155;
+	--flow-accent-ink: #ffffff;
+	--flow-shadow-lift: 0 1px 2px rgb(16 24 40 / 0.05), 0 14px 32px -14px rgb(16 24 40 / 0.22);
+}
+[data-theme="dark"] {
+	--flow-accent: #3cc9ae;
+	--flow-accent-strong: #2aae95;
+	--flow-accent-ink: #04211c;
+	--flow-shadow-lift: 0 1px 2px rgb(0 0 0 / 0.4), 0 14px 32px -14px rgb(0 0 0 / 0.7);
 }
 
 /* frappe-ui forces `font-family: InterVar`, a face the desk doesn't load (it
@@ -19,6 +32,207 @@
 .flow-panel {
 	font-family: "Inter", "InterVariable", ui-sans-serif, system-ui, sans-serif;
 	font-weight: 400;
+	font-feature-settings: "cv11", "ss03";
+	-webkit-font-smoothing: antialiased;
+}
+
+/* Brand tile: the accent with a faint inner highlight, so it reads as an object, not a flat chip. */
+.flow-brand {
+	background: linear-gradient(155deg, var(--flow-accent) 0%, var(--flow-accent-strong) 100%);
+	color: var(--flow-accent-ink);
+	box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.16), 0 1px 2px rgb(16 24 40 / 0.18);
+}
+
+/* Header: quiet, with the hairline fading out toward the edges. */
+.flow-header {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 12px;
+	background: var(--surface-white);
+}
+.flow-header::after {
+	content: "";
+	position: absolute;
+	inset: auto 0 0 0;
+	height: 1px;
+	background: linear-gradient(90deg, transparent, var(--outline-gray-2) 18%, var(--outline-gray-2) 82%, transparent);
+}
+.flow-icon-btn {
+	display: inline-flex;
+	height: 28px;
+	width: 28px;
+	align-items: center;
+	justify-content: center;
+	border-radius: 8px;
+	color: var(--ink-gray-6);
+	transition: background-color 0.12s, color 0.12s;
+}
+.flow-icon-btn:hover:not(:disabled) {
+	background: var(--surface-gray-2);
+	color: var(--ink-gray-9);
+}
+.flow-icon-btn:focus-visible,
+.flow-send:focus-visible,
+.flow-suggestion:focus-visible {
+	outline: 2px solid var(--flow-accent);
+	outline-offset: 2px;
+}
+.flow-icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+/* The composer is the one raised object: it floats over the thread, lifts a little more when
+   focused and takes the accent as a soft ring. */
+.flow-composer {
+	border: 1px solid var(--outline-gray-2);
+	border-radius: 18px;
+	background: var(--surface-white);
+	box-shadow: var(--flow-shadow-lift);
+	transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
+}
+.flow-composer:focus-within {
+	border-color: color-mix(in srgb, var(--flow-accent) 55%, var(--outline-gray-2));
+	box-shadow: 0 0 0 4px color-mix(in srgb, var(--flow-accent) 14%, transparent), var(--flow-shadow-lift);
+}
+.flow-composer-drag {
+	border-color: var(--flow-accent);
+	background: color-mix(in srgb, var(--flow-accent) 6%, var(--surface-white));
+}
+.flow-send {
+	display: inline-flex;
+	height: 30px;
+	width: 30px;
+	align-items: center;
+	justify-content: center;
+	border-radius: 999px;
+	background: var(--flow-accent);
+	color: var(--flow-accent-ink);
+	transition: background-color 0.12s, transform 0.12s;
+}
+.flow-send:hover:not(:disabled) {
+	background: var(--flow-accent-strong);
+}
+.flow-send:active:not(:disabled) {
+	transform: scale(0.94);
+}
+.flow-send:disabled {
+	background: var(--surface-gray-3);
+	color: var(--ink-gray-4);
+	cursor: default;
+}
+.flow-send.is-stop {
+	background: var(--ink-gray-9);
+	color: var(--surface-white);
+}
+
+/* Messages fade into the composer instead of being cut off by it. */
+.flow-fade {
+	background: linear-gradient(to bottom, transparent, var(--surface-white) 70%);
+}
+
+/* The user's message carries a trace of the accent; the assistant's reply stays unboxed. */
+.flow-user-bubble {
+	background: color-mix(in srgb, var(--flow-accent) 9%, var(--surface-white));
+	border: 1px solid color-mix(in srgb, var(--flow-accent) 18%, var(--outline-gray-1));
+	border-radius: 18px 18px 6px 18px;
+}
+
+/* Approval and question cards. */
+.flow-card {
+	border: 1px solid var(--outline-gray-2);
+	border-radius: 14px;
+	background: var(--surface-white);
+	box-shadow: 0 1px 2px rgb(16 24 40 / 0.04), 0 6px 18px -10px rgb(16 24 40 / 0.18);
+	animation: flow-rise 0.22s ease-out;
+}
+.flow-card.is-danger {
+	border-color: color-mix(in srgb, var(--ink-red-3, #e5484d) 45%, var(--outline-gray-2));
+}
+.flow-tile {
+	display: inline-flex;
+	height: 24px;
+	width: 24px;
+	flex-shrink: 0;
+	align-items: center;
+	justify-content: center;
+	border-radius: 8px;
+	background: color-mix(in srgb, var(--flow-accent) 13%, var(--surface-white));
+	color: var(--flow-accent);
+}
+.flow-card.is-danger .flow-tile {
+	background: color-mix(in srgb, var(--ink-red-3, #e5484d) 12%, var(--surface-white));
+	color: var(--ink-red-3, #e5484d);
+}
+.flow-approve {
+	background: var(--flow-accent) !important;
+	color: var(--flow-accent-ink) !important;
+}
+.flow-approve:hover {
+	background: var(--flow-accent-strong) !important;
+}
+@keyframes flow-rise {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: none;
+	}
+}
+
+/* Empty state: suggested questions as a quiet list, not a grid of cards. */
+.flow-suggestion {
+	display: flex;
+	width: 100%;
+	align-items: center;
+	gap: 10px;
+	padding: 9px 12px;
+	border-radius: 12px;
+	text-align: left;
+	font-size: var(--text-sm);
+	color: var(--ink-gray-7);
+	transition: background-color 0.12s, color 0.12s;
+}
+.flow-suggestion:hover {
+	background: var(--surface-gray-2);
+	color: var(--ink-gray-9);
+}
+.flow-suggestion svg {
+	color: var(--ink-gray-4);
+	transition: color 0.12s;
+}
+.flow-suggestion:hover svg {
+	color: var(--flow-accent);
+}
+
+/* Live indicator beside "Thinking…". */
+.flow-pulse-dot {
+	height: 6px;
+	width: 6px;
+	border-radius: 999px;
+	background: var(--flow-accent);
+	animation: flow-pulse 1.4s ease-in-out infinite;
+}
+@keyframes flow-pulse {
+	0%,
+	100% {
+		opacity: 0.35;
+		transform: scale(0.8);
+	}
+	50% {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.flow-card,
+	.flow-pulse-dot {
+		animation: none;
+	}
 }
 
 /* Even vertical rhythm between an assistant message's blocks (text + tool cards).
@@ -86,4 +300,46 @@
 }
 .flow-scrollbar::-webkit-scrollbar-track {
 	background: transparent;
+}
+
+/* The thread dissolves under the header instead of meeting it with a hard edge. */
+.flow-thread {
+	-webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+	mask-image: linear-gradient(to bottom, transparent 0, #000 18px);
+}
+
+/* Tool activity ("Counting Records"): a quiet pill, with a dot that pulses while it runs. */
+.flow-activity {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+	padding: 3px 10px 3px 9px;
+	border: 1px solid var(--outline-gray-1);
+	border-radius: 999px;
+	background: var(--surface-gray-1);
+	font-size: 12.5px;
+	line-height: 1.4;
+	letter-spacing: 0;
+	transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+.flow-activity:not(.cursor-default):hover,
+.flow-activity.is-open {
+	background: var(--surface-gray-2);
+	border-color: var(--outline-gray-2);
+}
+.flow-activity-dot {
+	height: 6px;
+	width: 6px;
+	flex-shrink: 0;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--flow-accent) 70%, var(--surface-gray-1));
+}
+.flow-activity-dot.is-live {
+	background: var(--flow-accent);
+	animation: flow-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.flow-activity-dot.is-live {
+		animation: none;
+	}
 }

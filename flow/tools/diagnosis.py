@@ -18,6 +18,7 @@ import os
 import re
 from functools import lru_cache
 from typing import Annotated, Any
+from urllib.parse import quote
 
 import frappe
 
@@ -30,9 +31,28 @@ SKIPPED_DIRS = frozenset(
 )
 MAX_SOURCE_MATCHES = 2
 MIN_FRAGMENT = 12
+# A pasted message may carry the user's own words around it ("getting this error <message> how
+# to solve"): up to this many words are dropped from either end to find the message itself.
+MAX_TRIMMED_WORDS = 4
+MIN_WINDOW_WORDS = 5
 # Longer lines are minified bundles, not readable source.
 MAX_LINE = 400
 MAX_ERROR_LOGS = 3
+# Code and templates kept in the site's database rather than in an app: (DocType, fields searched).
+SITE_CODE = (
+	("Server Script", ("script",)),
+	("Client Script", ("script",)),
+	("Custom HTML Block", ("script", "html")),
+	("Print Format", ("html",)),
+	("Notification", ("message", "condition")),
+)
+# Other places a failure is recorded: (DocType, text field, filters, label).
+FAILURE_LOGS = (
+	("Scheduled Job Log", "details", {"status": "Failed"}, "Scheduled Job Log"),
+	("Email Queue", "error", {"status": "Error"}, "Email Queue"),
+	("Integration Request", "error", {"status": "Failed"}, "Integration Request"),
+	("Webhook Request Log", "error", {}, "Webhook Request Log"),
+)
 # Lines that raise or show a message rank above a mere mention of the text.
 RAISE_MARKERS = ("throw", "msgprint", "raise", "_(", "__(", "show_alert", "ValidationError")
 
@@ -104,6 +124,36 @@ KNOWN_CAUSES: tuple[tuple[re.Pattern, str, str], ...] = tuple(
 			"Correct the value's format: a phone number with its country code, or a full email address.",
 		),
 		(
+			r"lock wait timeout|deadlock|queryTimeoutError|query execution was interrupted",
+			"Two operations were changing the same data at once, or a query ran too long.",
+			"Retry in a minute. If it keeps happening, avoid running big imports or reports at the same time.",
+		),
+		(
+			r"data too long|integrityerror|datamismatch|incorrect (string|decimal|integer) value",
+			"A value is too long, or doesn't fit the field's type or a database constraint.",
+			"Shorten or correct the value in the field named in the message.",
+		),
+		(
+			r"smtp|email account|outgoing email|authentication failed|could not send mail|default email account",
+			"Outgoing email isn't set up correctly, or the mail server rejected the login.",
+			"Check **Email Account** (outgoing) and its password or app password, then retry from **Email Queue**.",
+		),
+		(
+			r"default (price list|warehouse|company|currency|cost center|account)|has no (account|default)",
+			"A default the document needs (company, warehouse, price list, account...) is not set.",
+			"Set it on the document, or as a default in the Company, Item, Stock Settings or Accounts Settings.",
+		),
+		(
+			r"cannot (link|be linked to) (a )?cancelled|is cancelled|docstatus",
+			"The document refers to another one that is cancelled, or is in a state that doesn't allow this action.",
+			"Pick a valid (not cancelled) document, or amend the cancelled one.",
+		),
+		(
+			r"too many requests|rate limit|429",
+			"Too many requests were sent in a short time.",
+			"Wait a minute and try again.",
+		),
+		(
 			r"session expired|csrf|invalid request|login required|authenticationerror",
 			"Your login session expired.",
 			"Reload the page and log in again.",
@@ -135,22 +185,26 @@ def _route_error(text: str) -> dict[str, Any] | None:
 def error_diagnosis(
 	error: Annotated[str, "The error message exactly as the user pasted it, including any traceback."],
 ) -> dict[str, Any]:
-	"""Diagnose an error message the user got on this site: where it is raised, recent
-	occurrences in the Error Log, the likely cause and how to fix it. Use whenever the user
-	pastes an error or asks why something failed. The diagnosis is shown to the user directly.
-	"""
+	"""Diagnose any error or failure on this site, pasted or described ("why did X fail"): where it
+	is raised (app code, scripts saved on the site), recent Error Log and failed jobs, emails
+	and integration calls, the likely cause and the fix."""
 	message, exception = _clean(error)
 	if not message:
 		raise ValueError("Paste the error message to diagnose.")
 
 	sources = _find_in_source(message) if _can_read_source() else []
+	if not sources:
+		# A message the user sees translated: search the code for its English original.
+		sources = _find_translated_source(message)
+	site_code = _find_in_site_code(message)
 	logs = _recent_error_logs(message, exception)
+	failures = _recent_failures(message)
 	causes = [(cause, fix) for pattern, cause, fix in KNOWN_CAUSES if pattern.search(f"{exception} {message}")]
 
 	if exception == "MandatoryError":
 		missing = message.rsplit("]:", 1)[-1].strip()
 		causes = [(f"Required field(s) left empty: {missing}.", "Fill in those fields, then save again.")]
-	return {"answer": _format(message, exception, sources, logs, causes[:2])}
+	return {"answer": _format(message, exception, sources, logs, causes[:2], site_code, failures)}
 
 
 def _clean(error: str) -> tuple[str, str]:
@@ -176,9 +230,11 @@ def _can_read_source() -> bool:
 def _find_in_source(message: str) -> list[dict[str, Any]]:
 	"""Where the message is raised: the exact text first, then its longest fixed parts, then
 	its leading words (a template's fixed start, "Could not find" of "Could not find {0}")."""
-	for needle, translated_only in [(n, False) for n in _needles(message)] + [
-		(n, True) for n in _leading_words(message)
-	]:
+	for needle, translated_only in (
+		[(n, False) for n in _needles(message)]
+		+ [(n, False) for n in _trimmed_windows(message)]
+		+ [(n, True) for n in _leading_words(message)]
+	):
 		hits = _search(needle, translated_only)
 		if hits:
 			hits.sort(key=lambda h: not any(m in h["line_text"] for m in RAISE_MARKERS))
@@ -199,6 +255,20 @@ def _needles(message: str) -> list[str]:
 	)
 	whole = message.strip(" .")
 	return ([whole] if " " in whole else []) + [f for f in fragments if f != whole][:4]
+
+
+def _trimmed_windows(message: str) -> list[str]:
+	"""The message with a few words cut from its start and/or end, longest first, for text the
+	user wrote around the real message. Only multi-word runs, so they stay specific."""
+	words = message.split()
+	windows = []
+	for cut in range(1, 2 * MAX_TRIMMED_WORDS + 1):
+		for head in range(max(0, cut - MAX_TRIMMED_WORDS), min(cut, MAX_TRIMMED_WORDS) + 1):
+			part = words[head : len(words) - (cut - head)]
+			phrase = " ".join(part).strip(" .,;:")
+			if len(part) >= MIN_WINDOW_WORDS and len(phrase) >= MIN_FRAGMENT and phrase not in windows:
+				windows.append(phrase)
+	return windows
 
 
 def _leading_words(message: str) -> list[str]:
@@ -268,6 +338,79 @@ def _source_files() -> tuple[str, ...]:
 	return tuple(files)
 
 
+def _find_translated_source(message: str) -> list[dict[str, Any]]:
+	"""Where the English original of a translated message is raised (via the site's Translation
+	records); empty when it isn't a translation or the user may not read source."""
+	if not _can_read_source() or not frappe.has_permission("Translation", "read"):
+		return []
+	for original in frappe.get_list(
+		"Translation", filters={"translated_text": message.strip(" .")}, pluck="source_text", limit=2
+	):
+		hits = _find_in_source(original)
+		if hits:
+			return hits
+	return []
+
+
+def _search_needles(message: str) -> list[str]:
+	"""Short, specific strings to look for in the database: the message's fixed parts."""
+	needles = [n for n in _needles(message) + _trimmed_windows(message) if len(n) <= 140]
+	return list(dict.fromkeys(needles))[:5]
+
+
+def _find_in_site_code(message: str) -> list[dict[str, str]]:
+	"""Server Scripts, Client Scripts, print formats and notifications on this site that contain
+	the message: an error raised from there is in no app's code."""
+	if not _can_read_source():
+		return []
+	needles = _search_needles(message)
+	found: list[dict[str, str]] = []
+	for doctype, fields in SITE_CODE:
+		if not frappe.db.exists("DocType", doctype) or not frappe.has_permission(doctype, "read"):
+			continue
+		meta = frappe.get_meta(doctype)
+		fields = [f for f in fields if meta.has_field(f)]
+		if not fields:
+			continue
+		for needle in needles:
+			names = frappe.get_list(
+				doctype,
+				or_filters=[[f, "like", f"%{needle}%"] for f in fields],
+				pluck="name",
+				limit=3,
+			)
+			if names:
+				found += [{"doctype": doctype, "name": n} for n in names]
+				break
+	return found[:5]
+
+
+def _recent_failures(message: str) -> list[dict[str, Any]]:
+	"""The latest matching entry of each other failure log (failed scheduled jobs, emails that
+	couldn't be sent, failed integration and webhook calls) the user may read."""
+	needles = _search_needles(message)
+	rows = []
+	for doctype, field, filters, label in FAILURE_LOGS:
+		if not frappe.db.exists("DocType", doctype) or not frappe.has_permission(doctype, "read"):
+			continue
+		if not frappe.get_meta(doctype).has_field(field):
+			continue
+		for needle in needles:
+			found = frappe.get_list(
+				doctype,
+				filters={**filters, field: ["like", f"%{needle}%"]},
+				fields=["name", "creation", field],
+				order_by="creation desc",
+				limit=1,
+			)
+			if found:
+				lines = [ln.strip() for ln in (found[0].get(field) or "").splitlines() if ln.strip()]
+				rows.append({"doctype": doctype, "label": label, "name": found[0].name,
+					"creation": found[0].creation, "summary": lines[-1][:200] if lines else ""})
+				break
+	return rows
+
+
 def _recent_error_logs(message: str, exception: str) -> list[dict[str, Any]]:
 	if not frappe.has_permission("Error Log", "read"):
 		return []
@@ -297,6 +440,8 @@ def _format(
 	sources: list[dict[str, Any]],
 	logs: list[dict[str, Any]],
 	causes: list[tuple[str, str]],
+	site_code: list[dict[str, str]] | None = None,
+	failures: list[dict[str, Any]] | None = None,
 ) -> str:
 	out = ["**Error diagnosis**", f"> {message}"]
 	if exception:
@@ -306,12 +451,29 @@ def _format(
 		out.append("**Likely cause**\n" + "\n".join(f"- {cause}" for cause, _fix in causes))
 		out.append("**How to fix**\n" + "\n".join(f"- {fix}" for _cause, fix in causes))
 
-	if sources:
+	if sources or site_code:
 		# Location only — users want the cause and the fix, not the code.
-		places = "\n".join(f"- {hit['app']} — `{hit['file']}`, line {hit['line']}" for hit in sources)
-		out.append("**Where it comes from**\n" + places)
+		places = [f"- {hit['app']} — `{hit['file']}`, line {hit['line']}" for hit in sources]
+		places += [
+			f"- {hit['doctype']} — [{hit['name']}](/desk/{hit['doctype'].lower().replace(' ', '-')}/{quote(hit['name'])})"
+			f" (a script or template saved on this site)"
+			for hit in site_code or []
+		]
+		out.append("**Where it comes from**\n" + "\n".join(places))
 	elif _can_read_source() and not causes:
-		out.append("**Where it comes from**\nThis exact message isn't in the installed apps' code — it may come from a custom script, a server script, or a translation.")
+		out.append(
+			"**Where it comes from**\nThis exact message isn't in the installed apps' code or in this site's "
+			"scripts, print formats or notifications — it may come from a translation or a custom app."
+		)
+
+	for failure in failures or []:
+		slug = failure["doctype"].lower().replace(" ", "-")
+		out.append(
+			f"**Recent failure in {failure['label']}**\n"
+			f"[{failure['name']}](/desk/{slug}/{quote(failure['name'])}), "
+			f"{frappe.utils.format_datetime(failure['creation'])}"
+			+ (f"\n> {failure['summary']}" if failure["summary"] else "")
+		)
 
 	if logs:
 		latest = logs[0]
@@ -329,9 +491,10 @@ def _format(
 			+ (f"\n> {summary}" if summary else "")
 		)
 
-	if not (causes or sources or logs):
+	if not (causes or sources or logs or site_code or failures):
 		out.append(
 			"I couldn't find this message in the code or the Error Log, and it doesn't match a known "
-			"error type. Tell me what you were doing when it appeared (which page, which button)."
+			"error type. Tell me what you were doing when it appeared (which page, which button), or ask "
+			"me to look it up in the Frappe docs."
 		)
 	return "\n\n".join(out)

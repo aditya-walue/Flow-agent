@@ -1,7 +1,7 @@
 <script setup>
 import BrandMark from "./BrandMark.vue";
 import SessionsMenu from "./SessionsMenu.vue";
-import { Button, FeatherIcon } from "@/lib/ui";
+import { FeatherIcon } from "@/lib/ui";
 import { useStore } from "@/store";
 import { __ } from "@/lib/translate";
 
@@ -11,9 +11,11 @@ const { recentSessions, switchSession, newChat, fullscreen, modelLoadingStatus }
 </script>
 
 <template>
-	<header class="flex items-center gap-1.5 border-b border-outline-gray-1 px-3 py-2">
-		<BrandMark :size="18" />
-		<span class="text-sm font-medium text-ink-gray-9">{{ __("Flow") }}</span>
+	<header class="flow-header">
+		<BrandMark :size="24" />
+		<span class="ml-0.5 text-[15px] font-semibold tracking-tight text-ink-gray-9">{{
+			__("Flow")
+		}}</span>
 		<span
 			v-if="modelLoadingStatus"
 			class="flow-shimmer-text ml-2 max-w-[220px] truncate text-xs text-ink-gray-5"
@@ -25,27 +27,22 @@ const { recentSessions, switchSession, newChat, fullscreen, modelLoadingStatus }
 
 		<SessionsMenu :sessions="recentSessions" @select="switchSession" />
 
-		<Button variant="ghost" :title="__('New chat')" @click="newChat">
-			<template #icon
-				><FeatherIcon name="plus" :stroke-width="2" class="h-3.5 w-3.5"
-			/></template>
-		</Button>
-		<Button
-			variant="ghost"
+		<button class="flow-icon-btn" :title="__('New chat')" @click="newChat">
+			<FeatherIcon name="plus" :stroke-width="2" class="h-4 w-4" />
+		</button>
+		<button
+			class="flow-icon-btn"
 			:title="fullscreen ? __('Exit full screen') : __('Full screen')"
 			@click="props.onToggleFullscreen && props.onToggleFullscreen()"
 		>
-			<template #icon
-				><FeatherIcon
-					:name="fullscreen ? 'minimize' : 'maximize'"
-					:stroke-width="2"
-					class="h-3.5 w-3.5"
-			/></template>
-		</Button>
-		<Button variant="ghost" :title="__('Close (Ctrl+I)')" @click="emit('close')">
-			<template #icon
-				><FeatherIcon name="x" :stroke-width="2" class="h-3.5 w-3.5"
-			/></template>
-		</Button>
+			<FeatherIcon
+				:name="fullscreen ? 'minimize' : 'maximize'"
+				:stroke-width="2"
+				class="h-4 w-4"
+			/>
+		</button>
+		<button class="flow-icon-btn" :title="__('Close (Ctrl+I)')" @click="emit('close')">
+			<FeatherIcon name="x" :stroke-width="2" class="h-4 w-4" />
+		</button>
 	</header>
 </template>

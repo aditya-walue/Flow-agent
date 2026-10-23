@@ -106,7 +106,12 @@ def _record_from_text(text: str) -> tuple[str, str] | None:
 		# ("1bj14mc8ae", or all letters like "hfpssoeeph"). Digit-bearing words are tried first;
 		# a word only matches when a record with exactly that ID exists.
 		words = re.findall(r"[A-Za-z0-9][A-Za-z0-9-./]{3,}", text or "")
-		tokens += [w for w in words if re.search(r"\d", w)] + [w for w in words if len(w) >= 8 and w.isalpha()]
+		# An all-letter word that is part of a DocType's name ("employee" in "assign a role to
+		# new employee") is a record type, not a random ID.
+		type_words = {w for name in _builtins()._doctype_names() for w in name.split()}
+		tokens += [w for w in words if re.search(r"\d", w)] + [
+			w for w in words if len(w) >= 8 and w.isalpha() and w.lower() not in type_words
+		]
 	for token in dict.fromkeys(tokens):
 		token = token.strip(".-/")
 		for doctype in ([named] if named else []) + _doctypes_for_series(token):
@@ -340,9 +345,8 @@ def show_records(
 	limit: Annotated[int | None, f"How many records to list, up to {LIST_ALL_LIMIT}. Default 20; when the user wants all of them, pass the total count."] = None,
 	start: Annotated[int, "Offset for pagination (number of records to skip). Default 0."] = 0,
 ) -> dict[str, Any]:
-	"""Show records (by ID, or a recent list) with key fields, plus the fields the user asked
-	about for a single record. Shown to the user directly. Use whenever the user asks to see,
-	view, or list records."""
+	"""Show records to the user: one by ID (plus the fields asked about) or a recent or filtered
+	list. Use for show, view, list and "what is the <field> of <record>"."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	route = doctype.lower().replace(" ", "-")
@@ -466,10 +470,9 @@ def _route_explain_doctype(text: str) -> dict[str, Any] | None:
 
 @tool(final_answer=True, route=_route_explain_doctype)
 def explain_doctype(doctype: DocTypeArg) -> dict[str, Any]:
-	"""Explain what one DocType (record type, e.g. "Sales Invoice") is: its module, purpose,
-	lifecycle, main fields and the records it links to, from the site's metadata. Shown to the
-	user directly. For a module, app or feature as a whole ("what is ERPNext manufacturing",
-	"how does payroll work") use frappe_docs instead."""
+	"""Explain what one DocType is: module, purpose, lifecycle, main fields and links. Use for
+	"what is <DocType>". Not for a module, app or feature as a whole ("how does payroll work"): use
+	frappe_docs."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	meta = frappe.get_meta(doctype)
@@ -517,9 +520,8 @@ def _route_document_flow(text: str) -> dict[str, Any] | None:
 
 @tool(final_answer=True, route=_route_document_flow)
 def document_flow(doctype: DocTypeArg) -> dict[str, Any]:
-	"""Explain where a DocType sits in its business process: its lifecycle, any approval
-	workflow, the documents it is usually made from, and the documents made from it next, as
-	the site's apps connect them. Shown to the user directly."""
+	"""Where a DocType sits in its business process: lifecycle, approval workflow, the documents
+	it is made from and the ones made from it next. Use for "what happens after <DocType>"."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	meta = frappe.get_meta(doctype)
@@ -605,9 +607,8 @@ def assignment_steps(
 	item: Annotated[str, 'DocType being assigned or linked, e.g. "Role" in "assign roles to employees".'],
 	target: Annotated[str, 'DocType it is assigned to, e.g. "Employee".'],
 ) -> dict[str, Any]:
-	"""Steps to assign, link or attach one kind of record to another ("how do I assign roles to
-	employees?"), found from the site's metadata: a field or table on the target, a field on the
-	item pointing back, or a record the target links to. Shown to the user directly. Changes nothing."""
+	"""Steps to assign, link or attach one kind of record to another ("assign roles to
+	employees"), found from field and table links in the metadata. Changes nothing."""
 	for doctype in (item, target):
 		if not frappe.has_permission(doctype, "read"):
 			raise PermissionError(f"No permission to read {doctype}")
@@ -830,9 +831,8 @@ def status_steps(
 	doctype: DocTypeArg,
 	status: Annotated[str, 'The status the user wants the record to reach, e.g. "Paid", "Completed".'],
 ) -> dict[str, Any]:
-	"""How a record reaches a status ("how do I mark this invoice as paid?"): submit or cancel for
-	submittable records, otherwise the connected document that sets the status (Paid -> Payment
-	Entry), from the site's metadata. Shown to the user directly. Changes nothing."""
+	"""How a record reaches a status ("mark this invoice as paid"): submit or cancel, or the
+	connected document that sets it (Paid -> Payment Entry). Changes nothing."""
 	if not frappe.has_permission(doctype, "read"):
 		raise PermissionError(f"No permission to read {doctype}")
 	meta = frappe.get_meta(doctype)
@@ -1077,10 +1077,9 @@ def role_permissions(
 	role: Annotated[str, 'Role name, e.g. "Sales User".'],
 	doctype: Annotated[str | None, "Limit to one DocType, e.g. \"Sales Invoice\". Omit for all."] = None,
 ) -> dict[str, Any]:
-	"""What a role is allowed to do (read, write, create, submit… per DocType) and how to give it
-	more or fewer permissions, from the site's permission rules. Use for "how do I give permissions
-	to a role", "what can this role access", "let role X edit Y". Shown to the user directly.
-	Changes nothing."""
+	"""What a role can do per DocType (read, write, create, submit…) and how to change it. Use
+	for "give permissions to a role", "what can this role access", "let role X edit Y". Changes
+	nothing."""
 	if not frappe.has_permission("Role", "read"):
 		raise PermissionError("No permission to read roles")
 	if not frappe.db.exists("Role", role):

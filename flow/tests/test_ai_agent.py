@@ -817,6 +817,15 @@ class TestBrowserModelContext(UnitTestCase):
 		self.assertEqual(pick("show me the invoices"), ["show_records", "count", "read", "find_doctypes"])
 		self.assertEqual(pick("create a quotation")[:2], ["create", "required_values"])
 		self.assertEqual(pick("why does my invoice fail"), ["error_diagnosis"])
+		# Words like "issue" or "problem" name a field or a topic as often as a failure.
+		self.assertNotIn("error_diagnosis", pick("what is the issue date of the invoice"))
+		self.assertEqual(pick("I can't submit the invoice"), ["error_diagnosis"])
+
+		# A how-to with no dedicated tool (deleting, renaming...) goes to the docs, not to a
+		# tool that explains what comes after a document.
+		with_docs = self._schemas("document_flow", "explain_doctype", "frappe_docs", "web_search")
+		names = [t["function"]["name"] for t in _relevant_tools([{"role": "user", "content": "how to delete the user"}], with_docs)]
+		self.assertEqual(names, ["frappe_docs", "web_search"])
 		self.assertEqual(pick("how to assign roles to users"), ["assignment_steps", "explain_doctype"])
 		self.assertEqual(pick("how do I mark this invoice as paid"), ["status_steps", "document_flow"])
 		self.assertEqual(pick("what permissions does Sales User have"), ["role_permissions", "explain_doctype"])
