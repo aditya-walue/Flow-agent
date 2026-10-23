@@ -218,6 +218,16 @@ def laya_metrics(days: int | str = 7) -> dict[str, Any]:
 
 
 @frappe.whitelist()
+def laya_status() -> dict[str, Any]:
+	"""Whether Laya is on and its checkpoint loaded on this site, with the last decisions.
+	System Managers only; for finding out why Flow Route Log stays empty."""
+	frappe.only_for("System Manager")
+	from flow.lib.laya_router import status
+
+	return status()
+
+
+@frappe.whitelist()
 def attach_file(file: str) -> dict[str, Any]:
 	"""Validate and extract an uploaded File for use as a chat attachment. Errors
 	(unsupported type, unreadable, not owned) surface here, at upload time. The

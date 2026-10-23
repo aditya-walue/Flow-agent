@@ -56,6 +56,24 @@ class TestLayaRouter(IntegrationTestCase):
 	def _last_log(self):
 		return frappe.get_last_doc("Flow Route Log")
 
+	def test_status_reports_settings_without_the_token(self):
+		frappe.conf.flow_laya_enabled = True
+		frappe.conf.flow_laya_model_path = "owner/some-checkpoint"
+		frappe.conf.flow_hf_token = "hf_secret_value"
+		status = laya_router.status()
+		self.assertTrue(status["enabled"])
+		self.assertEqual(status["model_path"], "owner/some-checkpoint")
+		self.assertTrue(status["token_set"])
+		self.assertNotIn("hf_secret_value", json.dumps(status, default=str))
+		self.assertFalse(status["loaded_in_this_worker"])
+
+	def test_status_endpoint_is_for_system_managers(self):
+		from flow.api import laya_status
+
+		self.assertIn("enabled", laya_status())
+		with self.set_user("Guest"), self.assertRaises(frappe.PermissionError):
+			laya_status()
+
 	def test_disabled_does_nothing(self):
 		frappe.conf.flow_laya_enabled = False
 		router = _laya("TROUBLESHOOTING", 0.99)
