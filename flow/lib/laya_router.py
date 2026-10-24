@@ -13,14 +13,15 @@ Laya only chooses. It never calls create/update/delete or any business action: t
 route to are read-only, and writes still go through the model, the tools' prechecks, the user's
 permissions and the approval card.
 
-Off unless enabled, and optional: if the `laya` package isn't installed, fails to load, or errors,
-Flow behaves as if it were disabled. Site config (site_config.json):
+On by default with Flow's own checkpoint, and optional: if the checkpoint or runtime isn't
+available, fails to load, or errors, Flow behaves as if it were disabled. Every setting below is
+an optional override in site config (site_config.json):
 
-    flow_laya_enabled    true to turn it on (default false)
-    flow_laya_threshold  calibrated confidence needed to route directly (default 0.8)
+    flow_laya_enabled    set to 0/false to turn it off (default on)
+    flow_laya_threshold  calibrated confidence needed to route directly (default 0.85)
     flow_laya_model      Laya checkpoint name, e.g. "english" (default: Laya's own routing)
     flow_laya_model_path checkpoint fine-tuned on Flow (scripts/laya/finetune.py): a local folder or
-                         a Hugging Face repo id; asked FINETUNED_QUESTIONS, the questions it was
+                         a Hugging Face repo id (default DEFAULT_MODEL_PATH); asked FINETUNED_QUESTIONS, the questions it was
                          trained on. A checkpoint containing laya.onnx runs on Flow's own ONNX
                          runner (flow/lib/laya_onnx.py) — no PyTorch or `laya` package needed
     flow_hf_token        read token for a private Hugging Face checkpoint when the HF_TOKEN
@@ -43,7 +44,9 @@ from typing import Any
 
 import frappe
 
-DEFAULT_THRESHOLD = 0.8
+DEFAULT_THRESHOLD = 0.85
+# Flow's fine-tuned checkpoint, so Laya works without any site config.
+DEFAULT_MODEL_PATH = "aditya-walue/flow-laya-intent"
 INPUT_LOG_LIMIT = 500
 
 # The intents shared with the other assistants on this bench, plus the two Flow also handles.
@@ -118,7 +121,22 @@ class RouteDecision:
 
 
 def enabled() -> bool:
-	return bool(frappe.conf.get("flow_laya_enabled"))
+	"""On unless the site sets flow_laya_enabled to a falsy value; unset means on."""
+	value = frappe.conf.get("flow_laya_enabled")
+	return True if value is None else bool(value)
+
+
+def _model_path() -> str | None:
+	"""The fine-tuned checkpoint to use: the site's, else Flow's own unless the site picked a
+	stock Laya model with flow_laya_model."""
+	configured = frappe.conf.get("flow_laya_model_path")
+	if configured:
+		return configured
+	return None if frappe.conf.get("flow_laya_model") else DEFAULT_MODEL_PATH
+
+
+def _threshold() -> float:
+	return float(frappe.conf.get("flow_laya_threshold") or DEFAULT_THRESHOLD)
 
 
 def route(text: str, available_tools: set[str]) -> tuple[str, dict[str, Any]] | None:
@@ -144,7 +162,7 @@ def route(text: str, available_tools: set[str]) -> tuple[str, dict[str, Any]] | 
 
 
 def _classify(text: str, decision: RouteDecision) -> None:
-	finetuned = frappe.conf.get("flow_laya_model_path")
+	finetuned = _model_path()
 	if finetuned:
 		result = _finetuned_agent(finetuned).system_one(text, FINETUNED_QUESTIONS)
 		result.setdefault("routing", {"model": finetuned})
@@ -166,7 +184,7 @@ def _decide(text: str, decision: RouteDecision, available: set[str]) -> None:
 	"""Pick a read-only Flow tool for a confident, simple request; otherwise fall back."""
 	from flow.tools.builtins import _find_doctype_in_text, _parse_create_request
 
-	threshold = float(frappe.conf.get("flow_laya_threshold") or DEFAULT_THRESHOLD)
+	threshold = _threshold()
 	if decision.confidence < threshold:
 		decision.reason = f"confidence {decision.confidence:.2f} below {threshold:.2f}"
 		return
@@ -402,10 +420,10 @@ def _log(text: str, decision: RouteDecision) -> None:
 def status() -> dict[str, Any]:
 	"""Why Laya is or isn't answering on this site: the settings it reads, whether its checkpoint
 	has loaded in this worker, and the last decisions logged. Never includes the token."""
-	path = frappe.conf.get("flow_laya_model_path")
+	path = _model_path()
 	out: dict[str, Any] = {
 		"enabled": enabled(),
-		"threshold": frappe.conf.get("flow_laya_threshold"),
+		"threshold": _threshold(),
 		"model_path": path,
 		"token_set": bool(_hf_token()),
 		"decisions_logged": frappe.db.count("Flow Route Log"),
