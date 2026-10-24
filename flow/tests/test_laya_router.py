@@ -36,10 +36,17 @@ class TestLayaRouter(IntegrationTestCase):
 	def setUp(self):
 		self._conf = {
 			k: frappe.conf.get(k)
-			for k in ("flow_laya_enabled", "flow_laya_threshold", "flow_laya_model_path", "flow_laya_backend")
+			for k in (
+				"flow_laya_enabled",
+				"flow_laya_threshold",
+				"flow_laya_model",
+				"flow_laya_model_path",
+				"flow_laya_backend",
+			)
 		}
 		# These tests stub Laya; a site pointed at a real checkpoint must not load it here.
 		frappe.conf.flow_laya_model_path = None
+		frappe.conf.flow_laya_model = "english"
 		frappe.conf.flow_laya_backend = None
 		frappe.conf.flow_laya_enabled = True
 		frappe.conf.flow_laya_threshold = 0.8
@@ -66,6 +73,20 @@ class TestLayaRouter(IntegrationTestCase):
 		self.assertTrue(status["token_set"])
 		self.assertNotIn("hf_secret_value", json.dumps(status, default=str))
 		self.assertFalse(status["loaded_in_this_worker"])
+
+	def test_on_with_flows_checkpoint_when_site_config_is_empty(self):
+		frappe.conf.flow_laya_enabled = None
+		frappe.conf.flow_laya_threshold = None
+		frappe.conf.flow_laya_model = None
+		frappe.conf.flow_laya_model_path = None
+		status = laya_router.status()
+		self.assertTrue(status["enabled"])
+		self.assertEqual(status["model_path"], laya_router.DEFAULT_MODEL_PATH)
+		self.assertEqual(status["threshold"], laya_router.DEFAULT_THRESHOLD)
+
+	def test_site_can_still_turn_it_off(self):
+		frappe.conf.flow_laya_enabled = 0
+		self.assertFalse(laya_router.enabled())
 
 	def test_status_endpoint_is_for_system_managers(self):
 		from flow.api import laya_status
